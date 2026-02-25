@@ -1,0 +1,13 @@
+credentials.json
+__pycache__/
+*.png
+*.html
+*.json
+.env
+*.pyc
+
+# 디버그/진단 스크립트
+debug_*.py
+diagnose*.py
+test_*.py
+check_*.py
