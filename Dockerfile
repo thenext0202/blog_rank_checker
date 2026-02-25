@@ -16,8 +16,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY rank.py .
-# v2: 시트 구조 변경 (발행처 열 추가, 섹션 정보 표시)
+COPY . .
 
 ENV CHROME_BIN=/usr/bin/google-chrome
 ENV PYTHONUNBUFFERED=1
