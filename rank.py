@@ -54,6 +54,9 @@ def connect_sheet():
         "https://www.googleapis.com/auth/drive",
     ]
     # Railway: GOOGLE_CREDENTIALS_BASE64 환경변수 우선, 없으면 로컬 파일 폴백
+    # 디버그: GOOGLE/CRED 관련 환경변수 키 출력
+    env_keys = [k for k in os.environ if "GOOGLE" in k.upper() or "CRED" in k.upper()]
+    print(f"    [디버그] 관련 환경변수 키: {env_keys}")
     creds_b64 = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
     print(f"    [디버그] GOOGLE_CREDENTIALS_BASE64 존재: {bool(creds_b64)}, 길이: {len(creds_b64) if creds_b64 else 0}")
     if creds_b64:
