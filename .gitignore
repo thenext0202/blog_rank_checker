@@ -5,6 +5,12 @@ __pycache__/
 .env
 *.pyc
 
+# Chrome 프로필 (로그인 세션)
+chrome_profile/
+
+# 블로그 콘텐츠 JSON은 추적
+!blog_content/*.json
+
 # 디버그/진단 스크립트
 debug_*.py
 diagnose*.py
