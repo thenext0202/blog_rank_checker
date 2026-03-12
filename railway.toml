@@ -1,6 +1,2 @@
-[build]
-builder = "DOCKERFILE"
-dockerfilePath = "./Dockerfile"
-
 [deploy]
 startCommand = "python rank.py watch"
