@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Railway 시작 스크립트
+Railway 시작 스크립트 v4
 GOOGLE_CREDENTIALS_BASE64 → credentials.json 파일로 변환 후 rank.py 실행
 """
 import os, base64, json, sys
+print("=== STARTUP v4 ===", flush=True)
 
 creds_b64 = os.environ.get('GOOGLE_CREDENTIALS_BASE64', '')
 
