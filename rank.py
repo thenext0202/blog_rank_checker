@@ -31,11 +31,7 @@ import urllib.parse
 
 import gspread
 from google.oauth2.service_account import Credentials
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
+from playwright.sync_api import sync_playwright
 
 
 # ━━━━━━━━━━━━━━━━━━━━ 설정 ━━━━━━━━━━━━━━━━━━━━
@@ -75,58 +71,35 @@ def connect_sheet():
 
 
 # ────────────────────────────────────────────────
-#  Selenium 브라우저
+#  Playwright 브라우저
 # ────────────────────────────────────────────────
 
-def create_driver():
-    """headless Chrome 생성 (자동화 탐지 우회 포함)"""
-    opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-    opts.add_experimental_option("useAutomationExtension", False)
-    opts.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
+def create_browser():
+    """Playwright headless Chromium 생성 (자동화 탐지 우회 포함)"""
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--window-size=1920,1080",
+            "--disable-blink-features=AutomationControlled",
+        ]
     )
-
-    # Chrome 경로 자동 탐색 (로컬/Docker/Nixpacks 순서로)
-    chrome_candidates = [
-        os.environ.get("CHROME_BIN"),
-        "/usr/bin/google-chrome",
-        "/usr/bin/chromium",
-        "/usr/bin/chromium-browser",
-        "/nix/var/nix/profiles/default/bin/chromium",
-    ]
-    chromedriver_candidates = [
-        os.environ.get("CHROMEDRIVER_BIN"),
-        "/usr/bin/chromedriver",
-        "/nix/var/nix/profiles/default/bin/chromedriver",
-    ]
-
-    chrome_bin = next((p for p in chrome_candidates if p and os.path.exists(p)), None)
-    chromedriver_bin = next((p for p in chromedriver_candidates if p and os.path.exists(p)), None)
-
-    if chrome_bin and chromedriver_bin:
-        opts.binary_location = chrome_bin
-        driver = webdriver.Chrome(service=Service(chromedriver_bin), options=opts)
-    else:
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()),
-            options=opts,
-        )
-    # navigator.webdriver 플래그 숨기기
-    driver.execute_cdp_cmd(
-        "Page.addScriptToEvaluateOnNewDocument",
-        {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"},
+    context = browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1920, "height": 1080}
     )
-    driver.implicitly_wait(5)
-    return driver
+    context.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    )
+    page = context.new_page()
+    return pw, browser, page
 
 
 # ────────────────────────────────────────────────
@@ -145,22 +118,22 @@ def is_match(result_url: str, target_url: str) -> bool:
     return normalize(target_url) in normalize(result_url)
 
 
-def scroll_full(driver, max_iter=10, pause=1.5):
+def scroll_full(page, max_iter=10, pause=1.5):
     """더 이상 늘어나지 않을 때까지 스크롤"""
-    prev = driver.execute_script("return document.body.scrollHeight")
+    prev = page.evaluate("document.body.scrollHeight")
     for _ in range(max_iter):
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         time.sleep(pause)
-        curr = driver.execute_script("return document.body.scrollHeight")
+        curr = page.evaluate("document.body.scrollHeight")
         if curr == prev:
             break
         prev = curr
 
 
-def scroll_times(driver, n=3, pause=2.0):
+def scroll_times(page, n=3, pause=2.0):
     """고정 n회 스크롤 (무한스크롤 대응)"""
     for _ in range(n):
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         time.sleep(pause)
 
 
@@ -292,17 +265,17 @@ BLOG_EXTRACT_JS = """
 #  순위 체크
 # ────────────────────────────────────────────────
 
-def check_main(driver, keyword, target_url):
+def check_main(page, keyword, target_url):
     """통합검색(메인) - 블로그/카페/지식인만 카운트, 광고 제외"""
-    driver.get(
+    page.goto(
         "https://search.naver.com/search.naver?query="
         + urllib.parse.quote(keyword)
     )
     time.sleep(3)
-    scroll_full(driver)
+    scroll_full(page)
     time.sleep(1)
 
-    results = driver.execute_script(MAIN_EXTRACT_JS) or []
+    results = page.evaluate(MAIN_EXTRACT_JS) or []
     print(f"\n           [디버그] 메인 결과 {len(results)}개 (블로그/카페/지식인):")
     for i, item in enumerate(results[:10], 1):
         u = item[0] if isinstance(item, list) else item
@@ -316,17 +289,17 @@ def check_main(driver, keyword, target_url):
     return None, ""
 
 
-def check_blog(driver, keyword, target_url, limit=150):
+def check_blog(page, keyword, target_url, limit=150):
     """블로그탭 - 올바른 URL(ssc=tab.blog.all) + 블로그 글만 추출, 광고 제외"""
-    driver.get(
+    page.goto(
         "https://search.naver.com/search.naver?ssc=tab.blog.all&sm=tab_jum&query="
         + urllib.parse.quote(keyword)
     )
     time.sleep(3)
-    scroll_times(driver, n=5, pause=2.0)
+    scroll_times(page, n=5, pause=2.0)
     time.sleep(1)
 
-    results = driver.execute_script(BLOG_EXTRACT_JS) or []
+    results = page.evaluate(BLOG_EXTRACT_JS) or []
     print(f"\n           [디버그] 블로그탭 결과 {len(results)}개:")
     for i, u in enumerate(results[:10], 1):
         print(f"             {i}. {u}")
@@ -441,7 +414,7 @@ def main():
 
     # 2) 브라우저 시작
     print("\n[2] 브라우저 준비 중...")
-    driver = create_driver()
+    pw, browser, page = create_browser()
     print("    준비 완료!")
 
     # 3) 키워드별 순위 검색
@@ -457,12 +430,12 @@ def main():
 
             try:
                 print("           메인 검색 중...", end=" ", flush=True)
-                mr, section = check_main(driver, kw, url)
+                mr, section = check_main(page, kw, url)
                 mc = f"{mr}위({section})" if mr else "순위 밖"
                 print(mc)
 
                 print("           블로그탭 검색 중...", end=" ", flush=True)
-                br = check_blog(driver, kw, url)
+                br = check_blog(page, kw, url)
                 bc = str(br) + "위" if br else "순위 밖"
                 print(bc)
 
@@ -497,15 +470,17 @@ def main():
             except Exception as e:
                 print(f"\n           [!] 오류 발생, 브라우저 재시작: {e}")
                 try:
-                    driver.quit()
+                    browser.close()
+                    pw.stop()
                 except Exception:
                     pass
-                driver = create_driver()
+                pw, browser, page = create_browser()
 
             time.sleep(2)
 
     finally:
-        driver.quit()
+        browser.close()
+        pw.stop()
 
     print("\n" + "=" * 50)
     print("  모든 키워드 처리 완료!")
@@ -527,7 +502,9 @@ def watch(interval=60):
     print("=" * 50)
 
     ws = connect_sheet()
-    driver = None
+    pw = None
+    browser = None
+    page = None
 
     # K열 헤더 확인
     header = ws.row_values(1)
@@ -543,9 +520,12 @@ def watch(interval=60):
             if hour < 10 or hour >= 18:
                 now = datetime.now(KST).strftime("%H:%M:%S")
                 print(f"\r  [{now}] 운영 시간 외 (10:00~18:00만 감시)", end="", flush=True)
-                if driver:
-                    driver.quit()
-                    driver = None
+                if browser:
+                    browser.close()
+                    pw.stop()
+                    browser = None
+                    pw = None
+                    page = None
                 ws = None
                 time.sleep(60)
                 continue
@@ -618,9 +598,9 @@ def watch(interval=60):
 
             print(f"\n\n  >> 체크 감지! {len(targets)}개 처리 시작")
 
-            if driver is None:
+            if browser is None:
                 print("  브라우저 준비 중...")
-                driver = create_driver()
+                pw, browser, page = create_browser()
                 print("  준비 완료!")
 
             for i, target in enumerate(targets):
@@ -631,12 +611,12 @@ def watch(interval=60):
 
                 try:
                     print("           메인 검색 중...", end=" ", flush=True)
-                    mr, section = check_main(driver, kw, url)
+                    mr, section = check_main(page, kw, url)
                     mc = f"{mr}위({section})" if mr else "순위 밖"
                     print(mc)
 
                     print("           블로그탭 검색 중...", end=" ", flush=True)
-                    br = check_blog(driver, kw, url)
+                    br = check_blog(page, kw, url)
                     bc = str(br) + "위" if br else "순위 밖"
                     print(bc)
 
@@ -671,10 +651,11 @@ def watch(interval=60):
                 except Exception as e:
                     print(f"\n           [!] 오류: {e}")
                     try:
-                        driver.quit()
+                        browser.close()
+                        pw.stop()
                     except Exception:
                         pass
-                    driver = create_driver()
+                    pw, browser, page = create_browser()
 
                 time.sleep(2)
 
@@ -683,8 +664,9 @@ def watch(interval=60):
     except KeyboardInterrupt:
         print("\n\n  감시 모드 종료!")
     finally:
-        if driver:
-            driver.quit()
+        if browser:
+            browser.close()
+            pw.stop()
 
 
 if __name__ == "__main__":

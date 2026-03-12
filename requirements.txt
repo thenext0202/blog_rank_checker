@@ -1,4 +1,3 @@
 gspread
 google-auth
-selenium
-webdriver-manager
+playwright

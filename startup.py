@@ -4,11 +4,18 @@ Railway 시작 스크립트 v4
 GOOGLE_CREDENTIALS_BASE64 → credentials.json 파일로 변환 후 rank.py 실행
 """
 import os, base64, json, sys
-print("=== STARTUP v5 ===", flush=True)
+print("=== STARTUP v6 (Playwright) ===", flush=True)
 import subprocess
-for name in ["google-chrome", "chromium", "chromedriver"]:
-    r = subprocess.run(["which", name], capture_output=True, text=True)
-    print(f"[startup] which {name}: {r.stdout.strip() or 'NOT FOUND'}", flush=True)
+# Playwright chromium 설치
+print("[startup] playwright install chromium...", flush=True)
+r = subprocess.run(
+    ["playwright", "install", "chromium", "--with-deps"],
+    capture_output=True, text=True
+)
+if r.returncode == 0:
+    print("[startup] playwright chromium 설치 완료", flush=True)
+else:
+    print(f"[startup] playwright install 오류: {r.stderr[:200]}", flush=True)
 
 creds_b64 = os.environ.get('GOOGLE_CREDENTIALS_BASE64', '')
 
