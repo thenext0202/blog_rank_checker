@@ -32,6 +32,9 @@ if creds_b64:
             json.dump(info, f, indent=2)
         print("[startup] credentials.json 저장 완료")
 
+        # env var 제거 → rank.py가 파일로 읽도록
+        del os.environ['GOOGLE_CREDENTIALS_BASE64']
+
     except Exception as e:
         print(f"[startup] ERROR: {e}", file=sys.stderr)
         sys.exit(1)
