@@ -87,11 +87,22 @@ def create_driver():
         "Chrome/131.0.0.0 Safari/537.36"
     )
 
-    # Docker/Railway: CHROME_BIN 환경변수가 있으면 시스템 Chrome 사용
-    chrome_bin = os.environ.get("CHROME_BIN")
-    if chrome_bin:
+    # Railway(Nix): CHROME_BIN 또는 chromium 경로 자동 탐색
+    chrome_bin = (
+        os.environ.get("CHROME_BIN")
+        or "/nix/var/nix/profiles/default/bin/chromium"
+    )
+    chromdriver_bin = (
+        os.environ.get("CHROMEDRIVER_BIN")
+        or "/nix/var/nix/profiles/default/bin/chromedriver"
+    )
+
+    if os.path.exists(chrome_bin):
         opts.binary_location = chrome_bin
-        driver = webdriver.Chrome(options=opts)
+        driver = webdriver.Chrome(
+            service=Service(chromdriver_bin),
+            options=opts,
+        )
     else:
         driver = webdriver.Chrome(
             service=Service(ChromeDriverManager().install()),
