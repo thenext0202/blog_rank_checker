@@ -522,7 +522,7 @@ def watch(interval=60):
     print("  네이버 순위 체커 - 감시 모드")
     print(f"  {interval}초마다 시트를 확인합니다.")
     print("  운영 시간: 10:00 ~ 18:00")
-    print("  시트 I열(2행)에 체크하면 자동 실행!")
+    print("  시트 K열에 체크하면 자동 실행!")
     print("  종료: Ctrl+C")
     print("=" * 50)
 
