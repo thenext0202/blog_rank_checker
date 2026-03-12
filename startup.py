@@ -9,27 +9,21 @@ creds_b64 = os.environ.get('GOOGLE_CREDENTIALS_BASE64', '')
 
 if creds_b64:
     try:
-        # 공백/줄바꿈 제거
+        # 공백/줄바꿈 제거 및 패딩 보정
         creds_b64 = ''.join(creds_b64.split())
-        # 패딩 보정
         creds_b64 += '=' * (-len(creds_b64) % 4)
-        # base64 디코딩
+
+        # raw bytes 그대로 파일에 쓰기 (json 파싱/재직렬화 없음)
         decoded = base64.b64decode(creds_b64)
+        with open('/app/credentials.json', 'wb') as f:
+            f.write(decoded)
+
+        # 디버그용 검증
         info = json.loads(decoded.decode('utf-8'))
-
-        # private_key 줄바꿈 복원
-        pk = info.get('private_key', '')
-        if '\\n' in pk and '\n' not in pk:
-            pk = pk.replace('\\n', '\n')
-        info['private_key'] = pk
-
-        # 디버그 출력
         print(f"[startup] client_email: {info.get('client_email')}")
-        print(f"[startup] private_key starts: {info['private_key'][:40]}")
-
-        # credentials.json 파일로 저장
-        with open('/app/credentials.json', 'w') as f:
-            json.dump(info, f, indent=2)
+        pk = info.get('private_key', '')
+        print(f"[startup] private_key starts: {pk[:50]}")
+        print(f"[startup] newline in key: {chr(10) in pk}")
         print("[startup] credentials.json 저장 완료")
 
         # env var 제거 → rank.py가 파일로 읽도록
