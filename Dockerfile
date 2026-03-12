@@ -22,4 +22,4 @@ COPY . .
 ENV CHROME_BIN=/usr/bin/google-chrome
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "rank.py"]
+CMD ["python", "startup.py"]

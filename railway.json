@@ -11,6 +11,6 @@
     }
   },
   "deploy": {
-    "startCommand": "python rank.py watch"
+    "startCommand": "python startup.py"
   }
 }
