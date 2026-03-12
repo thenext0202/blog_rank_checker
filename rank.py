@@ -275,7 +275,7 @@ def check_main(page, keyword, target_url):
     scroll_full(page)
     time.sleep(1)
 
-    results = page.evaluate(MAIN_EXTRACT_JS) or []
+    results = page.evaluate("() => {" + MAIN_EXTRACT_JS + "}") or []
     print(f"\n           [디버그] 메인 결과 {len(results)}개 (블로그/카페/지식인):")
     for i, item in enumerate(results[:10], 1):
         u = item[0] if isinstance(item, list) else item
@@ -299,7 +299,7 @@ def check_blog(page, keyword, target_url, limit=150):
     scroll_times(page, n=5, pause=2.0)
     time.sleep(1)
 
-    results = page.evaluate(BLOG_EXTRACT_JS) or []
+    results = page.evaluate("() => {" + BLOG_EXTRACT_JS + "}") or []
     print(f"\n           [디버그] 블로그탭 결과 {len(results)}개:")
     for i, u in enumerate(results[:10], 1):
         print(f"             {i}. {u}")
