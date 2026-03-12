@@ -58,7 +58,15 @@ def connect_sheet():
     # Railway: GOOGLE_CREDENTIALS_BASE64 환경변수 우선, 없으면 로컬 파일 폴백
     creds_b64 = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
     if creds_b64:
-        info = json.loads(base64.b64decode(creds_b64))
+        # Railway UI가 공백/줄바꿈을 추가할 수 있으므로 제거
+        creds_b64 = ''.join(creds_b64.split())
+        # 패딩 보정
+        creds_b64 += '=' * (-len(creds_b64) % 4)
+        decoded = base64.b64decode(creds_b64).decode('utf-8')
+        info = json.loads(decoded)
+        # private_key \n 처리 (환경변수에서 literal \\n으로 저장된 경우)
+        if 'private_key' in info:
+            info['private_key'] = info['private_key'].replace('\\n', '\n')
         creds = Credentials.from_service_account_info(info, scopes=scope)
     else:
         creds = Credentials.from_service_account_file(CRED_FILE, scopes=scope)
