@@ -1,1 +1,1 @@
-worker: python rank.py watch
+worker: python startup.py
