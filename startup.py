@@ -22,8 +22,10 @@ if creds_b64:
         info = json.loads(decoded.decode('utf-8'))
         print(f"[startup] client_email: {info.get('client_email')}")
         pk = info.get('private_key', '')
-        print(f"[startup] private_key starts: {pk[:50]}")
-        print(f"[startup] newline in key: {chr(10) in pk}")
+        print(f"[startup] private_key length: {len(pk)}")
+        print(f"[startup] has BEGIN: {'-----BEGIN PRIVATE KEY-----' in pk}")
+        print(f"[startup] has END: {'-----END PRIVATE KEY-----' in pk}")
+        print(f"[startup] key tail: {repr(pk[-60:])}")
         print("[startup] credentials.json 저장 완료")
 
         # env var 제거 → rank.py가 파일로 읽도록
