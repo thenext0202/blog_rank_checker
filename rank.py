@@ -496,7 +496,7 @@ def watch(interval=60):
     print("=" * 50)
     print("  네이버 순위 체커 - 감시 모드")
     print(f"  {interval}초마다 시트를 확인합니다.")
-    print("  운영 시간: 10:00 ~ 18:00")
+    print("  운영 시간: 10:00 ~ 20:00")
     print("  시트 K열에 체크하면 자동 실행!")
     print("  종료: Ctrl+C")
     print("=" * 50)
@@ -517,9 +517,9 @@ def watch(interval=60):
     try:
         while True:
             hour = datetime.now(KST).hour
-            if hour < 10 or hour >= 18:
+            if hour < 10 or hour >= 20:
                 now = datetime.now(KST).strftime("%H:%M:%S")
-                print(f"\r  [{now}] 운영 시간 외 (10:00~18:00만 감시)", end="", flush=True)
+                print(f"\r  [{now}] 운영 시간 외 (10:00~20:00만 감시)", end="", flush=True)
                 if browser:
                     browser.close()
                     pw.stop()
