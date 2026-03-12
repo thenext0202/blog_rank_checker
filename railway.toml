@@ -3,5 +3,4 @@ builder = "DOCKERFILE"
 dockerfilePath = "./Dockerfile"
 
 [deploy]
-startCommand = "python rank.py"
-cronSchedule = "*/5 * * * *"
+startCommand = "python rank.py watch"

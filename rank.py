@@ -9,13 +9,15 @@ rank.py - 네이버 검색 순위 체커
   A: 날짜 | B: 발행처 | C: 키워드 | D: 링크
   E: 메인 순위1 | F: 블로그탭 순위1
   G: 메인 순위2 | H: 블로그탭 순위2
-  I: 실행 (체크박스, 2행에 체크하면 트리거)
+  I: 메인 순위3 | J: 블로그탭 순위3
+  K: 실행 (체크박스, 체크하면 트리거)
 
 동작:
   - 순위1(E,F) 비어있으면 → 순위1에 기록
   - 순위1 있고 순위2(G,H) 비어있으면 → 순위2에 기록
-  - 순위2 기록 시 순위 상승/진입이면 연노란색 표시
-  - 둘 다 있으면 → 건너뛰기
+  - 순위2 있고 순위3(I,J) 비어있으면 → 순위3에 기록
+  - 순위2,3 기록 시 순위 상승/진입이면 연노란색 표시
+  - 셋 다 있으면 → 건너뛰기
 
 사용법: python rank.py watch
 """
@@ -353,14 +355,14 @@ def main():
     ws = connect_sheet()
     rows = ws.get_all_values()
 
-    # I열 "실행" 헤더 자동 생성
+    # K열 "실행" 헤더 자동 생성
     header = rows[0] if rows else []
-    if len(header) < 9 or header[8] != "실행":
+    if len(header) < 11 or header[10] != "실행":
         ws.update(
-            values=[["메인 순위1", "블로그탭 순위1", "메인 순위2", "블로그탭 순위2", "실행"]],
-            range_name="E1:I1",
+            values=[["메인 순위1", "블로그탭 순위1", "메인 순위2", "블로그탭 순위2", "메인 순위3", "블로그탭 순위3", "실행"]],
+            range_name="E1:K1",
         )
-        print("    E~I열 헤더 설정 완료")
+        print("    E~K열 헤더 설정 완료")
 
     keywords = rows[1:]
     total = len(keywords)
@@ -368,24 +370,24 @@ def main():
         print("    시트에 데이터가 없습니다.")
         return
 
-    # I열 체크 확인 (트리거)
+    # K열 체크 확인 (트리거)
     has_trigger = False
     clear_rows = []
     for idx, row in enumerate(keywords):
-        chk = row[8].strip() if len(row) > 8 else ""
+        chk = row[10].strip() if len(row) > 10 else ""
         if is_checked(chk):
             has_trigger = True
             clear_rows.append(idx + 2)
 
     if not has_trigger:
-        print("    실행 대상이 없습니다. 시트 I열(2행)에 체크해주세요.")
+        print("    실행 대상이 없습니다. 시트 K열에 체크해주세요.")
         return
 
     # 체크 해제
     for r in clear_rows:
-        ws.update(values=[[False]], range_name=f"I{r}")
+        ws.update(values=[[False]], range_name=f"K{r}")
 
-    # 대상 필터링: 순위1 또는 순위2가 비어있는 행
+    # 대상 필터링: 순위1~3 중 비어있는 행
     targets = []
     for idx, row in enumerate(keywords):
         row_num = idx + 2
@@ -395,6 +397,8 @@ def main():
         f = row[5].strip() if len(row) > 5 else ""
         g = row[6].strip() if len(row) > 6 else ""
         h = row[7].strip() if len(row) > 7 else ""
+        i = row[8].strip() if len(row) > 8 else ""
+        j = row[9].strip() if len(row) > 9 else ""
 
         if not kw or not url:
             continue
@@ -403,7 +407,9 @@ def main():
             targets.append((row_num, kw, url, "slot1"))
         elif not g and not h:
             targets.append((row_num, kw, url, "slot2", e, f))
-        # 둘 다 있으면 건너뛰기
+        elif not i and not j:
+            targets.append((row_num, kw, url, "slot3", e, f, g, h))
+        # 셋 다 있으면 건너뛰기
 
     if not targets:
         print("    처리할 행이 없습니다 (모두 기록 완료)")
@@ -440,12 +446,10 @@ def main():
                 if slot == "slot1":
                     ws.update(values=[[mc, bc]], range_name=f"E{row_num}:F{row_num}")
                     print("           순위1 기록 완료")
-                else:
+                elif slot == "slot2":
                     prev_main, prev_blog = target[4], target[5]
                     ws.update(values=[[mc, bc]], range_name=f"G{row_num}:H{row_num}")
                     print("           순위2 기록 완료")
-
-                    # 순위 상승 시 연노란색 표시
                     main_up = is_improved(prev_main, mc)
                     blog_up = is_improved(prev_blog, bc)
                     if main_up:
@@ -453,6 +457,18 @@ def main():
                         print("           메인 순위 상승! 노란색 표시")
                     if blog_up:
                         ws.format(f"H{row_num}", LIGHT_YELLOW)
+                        print("           블로그탭 순위 상승! 노란색 표시")
+                else:  # slot3
+                    prev_main, prev_blog = target[6], target[7]
+                    ws.update(values=[[mc, bc]], range_name=f"I{row_num}:J{row_num}")
+                    print("           순위3 기록 완료")
+                    main_up = is_improved(prev_main, mc)
+                    blog_up = is_improved(prev_blog, bc)
+                    if main_up:
+                        ws.format(f"I{row_num}", LIGHT_YELLOW)
+                        print("           메인 순위 상승! 노란색 표시")
+                    if blog_up:
+                        ws.format(f"J{row_num}", LIGHT_YELLOW)
                         print("           블로그탭 순위 상승! 노란색 표시")
 
             except Exception as e:
@@ -488,12 +504,12 @@ def watch(interval=60):
     ws = connect_sheet()
     driver = None
 
-    # I열 헤더 확인
+    # K열 헤더 확인
     header = ws.row_values(1)
-    if len(header) < 9 or header[8] != "실행":
+    if len(header) < 11 or header[10] != "실행":
         ws.update(
-            values=[["메인 순위1", "블로그탭 순위1", "메인 순위2", "블로그탭 순위2", "실행"]],
-            range_name="E1:I1",
+            values=[["메인 순위1", "블로그탭 순위1", "메인 순위2", "블로그탭 순위2", "메인 순위3", "블로그탭 순위3", "실행"]],
+            range_name="E1:K1",
         )
 
     try:
@@ -528,11 +544,11 @@ def watch(interval=60):
                     continue
             keywords = rows[1:]
 
-            # I열에 체크가 하나라도 있는지 확인 (트리거)
+            # K열에 체크가 하나라도 있는지 확인 (트리거)
             has_trigger = False
             clear_rows = []
             for idx, row in enumerate(keywords):
-                chk = row[8].strip() if len(row) > 8 else ""
+                chk = row[10].strip() if len(row) > 10 else ""
                 if is_checked(chk):
                     has_trigger = True
                     clear_rows.append(idx + 2)
@@ -545,9 +561,9 @@ def watch(interval=60):
 
             # 체크 해제
             for r in clear_rows:
-                ws.update(values=[[False]], range_name=f"I{r}")
+                ws.update(values=[[False]], range_name=f"K{r}")
 
-            # 대상 필터링: 순위1 또는 순위2가 비어있는 행
+            # 대상 필터링: 순위1~3 중 비어있는 행
             targets = []
             for idx, row in enumerate(keywords):
                 row_num = idx + 2
@@ -557,6 +573,8 @@ def watch(interval=60):
                 f = row[5].strip() if len(row) > 5 else ""
                 g = row[6].strip() if len(row) > 6 else ""
                 h = row[7].strip() if len(row) > 7 else ""
+                i = row[8].strip() if len(row) > 8 else ""
+                j = row[9].strip() if len(row) > 9 else ""
 
                 if not kw or not url:
                     continue
@@ -565,6 +583,8 @@ def watch(interval=60):
                     targets.append((row_num, kw, url, "slot1"))
                 elif not g and not h:
                     targets.append((row_num, kw, url, "slot2", e, f))
+                elif not i and not j:
+                    targets.append((row_num, kw, url, "slot3", e, f, g, h))
 
             if not targets:
                 print(f"\n\n  >> 체크 감지했으나 처리할 행이 없습니다 (모두 기록 완료)")
@@ -598,11 +618,10 @@ def watch(interval=60):
                     if slot == "slot1":
                         ws.update(values=[[mc, bc]], range_name=f"E{row_num}:F{row_num}")
                         print("           순위1 기록 완료")
-                    else:
+                    elif slot == "slot2":
                         prev_main, prev_blog = target[4], target[5]
                         ws.update(values=[[mc, bc]], range_name=f"G{row_num}:H{row_num}")
                         print("           순위2 기록 완료")
-
                         main_up = is_improved(prev_main, mc)
                         blog_up = is_improved(prev_blog, bc)
                         if main_up:
@@ -610,6 +629,18 @@ def watch(interval=60):
                             print("           메인 순위 상승! 노란색 표시")
                         if blog_up:
                             ws.format(f"H{row_num}", LIGHT_YELLOW)
+                            print("           블로그탭 순위 상승! 노란색 표시")
+                    else:  # slot3
+                        prev_main, prev_blog = target[6], target[7]
+                        ws.update(values=[[mc, bc]], range_name=f"I{row_num}:J{row_num}")
+                        print("           순위3 기록 완료")
+                        main_up = is_improved(prev_main, mc)
+                        blog_up = is_improved(prev_blog, bc)
+                        if main_up:
+                            ws.format(f"I{row_num}", LIGHT_YELLOW)
+                            print("           메인 순위 상승! 노란색 표시")
+                        if blog_up:
+                            ws.format(f"J{row_num}", LIGHT_YELLOW)
                             print("           블로그탭 순위 상승! 노란색 표시")
 
                 except Exception as e:
