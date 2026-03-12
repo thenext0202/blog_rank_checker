@@ -515,6 +515,8 @@ def main():
 def watch(interval=60):
     """시트를 주기적으로 감시하며 I열 체크 시 자동 실행"""
     from datetime import datetime
+    import zoneinfo
+    KST = zoneinfo.ZoneInfo("Asia/Seoul")
 
     print("=" * 50)
     print("  네이버 순위 체커 - 감시 모드")
@@ -537,9 +539,9 @@ def watch(interval=60):
 
     try:
         while True:
-            hour = datetime.now().hour
+            hour = datetime.now(KST).hour
             if hour < 10 or hour >= 18:
-                now = datetime.now().strftime("%H:%M:%S")
+                now = datetime.now(KST).strftime("%H:%M:%S")
                 print(f"\r  [{now}] 운영 시간 외 (10:00~18:00만 감시)", end="", flush=True)
                 if driver:
                     driver.quit()
@@ -555,7 +557,7 @@ def watch(interval=60):
                     print("\n  시트 재연결 완료")
                 rows = ws.get_all_values()
             except Exception as e:
-                now = datetime.now().strftime("%H:%M:%S")
+                now = datetime.now(KST).strftime("%H:%M:%S")
                 print(f"\n  [{now}] 시트 연결 오류, 재연결 시도... ({e})")
                 try:
                     ws = connect_sheet()
@@ -577,7 +579,7 @@ def watch(interval=60):
                     clear_rows.append(idx + 2)
 
             if not has_trigger:
-                now = datetime.now().strftime("%H:%M:%S")
+                now = datetime.now(KST).strftime("%H:%M:%S")
                 print(f"\r  [{now}] 대기 중... (체크된 행 없음)", end="", flush=True)
                 time.sleep(interval)
                 continue
