@@ -87,22 +87,26 @@ def create_driver():
         "Chrome/131.0.0.0 Safari/537.36"
     )
 
-    # Railway(Nix): CHROME_BIN 또는 chromium 경로 자동 탐색
-    chrome_bin = (
-        os.environ.get("CHROME_BIN")
-        or "/nix/var/nix/profiles/default/bin/chromium"
-    )
-    chromdriver_bin = (
-        os.environ.get("CHROMEDRIVER_BIN")
-        or "/nix/var/nix/profiles/default/bin/chromedriver"
-    )
+    # Chrome 경로 자동 탐색 (로컬/Docker/Nixpacks 순서로)
+    chrome_candidates = [
+        os.environ.get("CHROME_BIN"),
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/nix/var/nix/profiles/default/bin/chromium",
+    ]
+    chromedriver_candidates = [
+        os.environ.get("CHROMEDRIVER_BIN"),
+        "/usr/bin/chromedriver",
+        "/nix/var/nix/profiles/default/bin/chromedriver",
+    ]
 
-    if os.path.exists(chrome_bin):
+    chrome_bin = next((p for p in chrome_candidates if p and os.path.exists(p)), None)
+    chromedriver_bin = next((p for p in chromedriver_candidates if p and os.path.exists(p)), None)
+
+    if chrome_bin and chromedriver_bin:
         opts.binary_location = chrome_bin
-        driver = webdriver.Chrome(
-            service=Service(chromdriver_bin),
-            options=opts,
-        )
+        driver = webdriver.Chrome(service=Service(chromedriver_bin), options=opts)
     else:
         driver = webdriver.Chrome(
             service=Service(ChromeDriverManager().install()),

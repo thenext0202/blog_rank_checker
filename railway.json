@@ -1,8 +1,14 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
-    "builder": "DOCKERFILE",
-    "dockerfilePath": "Dockerfile"
+    "builder": "NIXPACKS",
+    "nixpacksPlan": {
+      "phases": {
+        "setup": {
+          "nixPkgs": ["python312", "chromium", "chromedriver"]
+        }
+      }
+    }
   },
   "deploy": {
     "startCommand": "python rank.py watch"
