@@ -1,0 +1,6 @@
+__pycache__/
+.api_key
+.naver_api
+.kakao_api
+data/
+error_log.txt
