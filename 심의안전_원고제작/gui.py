@@ -6,6 +6,7 @@ import re
 import json
 import threading
 import datetime
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 
@@ -89,9 +90,9 @@ class SafetyManuscriptApp:
                                sashrelief=tk.RAISED, bg=THEME["sash"], bd=1)
         paned.pack(fill=tk.BOTH, expand=True)
 
-        # 상단: 설정 (스크롤)
+        # 상단: 설정 (스크롤) — 초기에 설정 영역이 크게 보이도록
         top_pane = ttk.Frame(paned)
-        paned.add(top_pane, stretch="never", minsize=200)
+        paned.add(top_pane, stretch="always", minsize=300, height=600)
 
         canvas = tk.Canvas(top_pane, highlightthickness=0, bg=THEME["bg"])
         scrollbar = ttk.Scrollbar(top_pane, orient=tk.VERTICAL, command=canvas.yview)
@@ -114,7 +115,7 @@ class SafetyManuscriptApp:
 
         # 하단: 버튼+결과
         bottom_pane = ttk.Frame(paned)
-        paned.add(bottom_pane, stretch="always", minsize=200)
+        paned.add(bottom_pane, stretch="never", minsize=200)
 
         sc = ttk.Frame(sf)
         sc.pack(fill=tk.X, padx=0, pady=0)
@@ -147,26 +148,30 @@ class SafetyManuscriptApp:
         self.date_var = tk.StringVar(value=datetime.datetime.now().strftime("%y%m%d"))
         ttk.Entry(row1, textvariable=self.date_var, width=10).grid(row=1, column=3, sticky='w', padx=(0, 15), pady=(5, 0))
 
-        # ── 심의안전: 키워드그룹 & 강조점 ──
-        safety_frame = ttk.LabelFrame(sc, text="심의안전 — 키워드그룹 & 강조점", padding=10)
-        safety_frame.pack(fill=tk.X, padx=10, pady=5)
+        # ── 키워드 ──
+        row3 = ttk.LabelFrame(sc, text="키워드", padding=10)
+        row3.pack(fill=tk.X, padx=10, pady=5)
 
-        sf_top = ttk.Frame(safety_frame)
-        sf_top.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(row3, text="메인:").grid(row=0, column=0, sticky='e', padx=(0, 5))
+        self.keyword_entry = ttk.Entry(row3, width=40)
+        self.keyword_entry.grid(row=0, column=1, sticky='w', padx=(0, 15))
 
-        ttk.Label(sf_top, text="키워드그룹:").pack(side=tk.LEFT, padx=(0, 5))
-        self.safety_group_var = tk.StringVar()
-        self.safety_group_combo = ttk.Combobox(sf_top, textvariable=self.safety_group_var,
-                                                state='readonly', width=35)
-        self.safety_group_combo.pack(side=tk.LEFT, padx=(0, 10))
-        self.safety_group_var.trace_add('write', lambda *a: self._on_safety_group_changed())
+        ttk.Label(row3, text="연관:").grid(row=0, column=2, sticky='e', padx=(0, 5))
+        self.sub_keyword_entry = ttk.Entry(row3, width=40)
+        self.sub_keyword_entry.grid(row=0, column=3, sticky='w')
 
-        self.safety_combo_label = ttk.Label(sf_top, text="강조점 조합: -", font=('맑은 고딕', 9, 'bold'))
-        self.safety_combo_label.pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(row3, text="상품 링크:").grid(row=1, column=0, sticky='e', padx=(0, 5), pady=(5, 0))
+        self.link_entry = ttk.Entry(row3, width=40)
+        self.link_entry.grid(row=1, column=1, sticky='w', pady=(5, 0))
 
-        self.safety_preview = tk.Text(safety_frame, height=5, font=('맑은 고딕', 9),
-                                       wrap=tk.WORD, state='disabled', bg='#F5F5F5')
-        self.safety_preview.pack(fill=tk.X)
+        ttk.Label(row3, text="nt_medium:").grid(row=1, column=2, sticky='e', padx=(0, 5), pady=(5, 0))
+        self.nt_medium_var = tk.StringVar()
+        ttk.Entry(row3, textvariable=self.nt_medium_var, width=20).grid(row=1, column=3, sticky='w', pady=(5, 0))
+
+        # 날짜/nt_medium/키워드 변경 시 상품 링크 자동 업데이트
+        self.date_var.trace_add('write', lambda *a: self._update_product_link())
+        self.nt_medium_var.trace_add('write', lambda *a: self._update_product_link())
+        self.keyword_entry.bind('<FocusOut>', lambda e: self._update_product_link())
 
         # ── 서식 옵션 ──
         row2 = ttk.LabelFrame(sc, text="서식 옵션", padding=10)
@@ -199,28 +204,40 @@ class SafetyManuscriptApp:
         self.title_repeat_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(row2, text="제목 3번 반복", variable=self.title_repeat_var).grid(row=0, column=col, sticky='w')
 
-        # ── 키워드 ──
-        row3 = ttk.LabelFrame(sc, text="키워드", padding=10)
-        row3.pack(fill=tk.X, padx=10, pady=5)
+        # ── 심의안전: 키워드그룹 & 강조점 ──
+        safety_frame = ttk.LabelFrame(sc, text="심의안전 — 키워드그룹 & 강조점", padding=10)
+        safety_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        ttk.Label(row3, text="메인:").grid(row=0, column=0, sticky='e', padx=(0, 5))
-        self.keyword_entry = ttk.Entry(row3, width=40)
-        self.keyword_entry.grid(row=0, column=1, sticky='w', padx=(0, 15))
+        sf_top = ttk.Frame(safety_frame)
+        sf_top.pack(fill=tk.X, pady=(0, 5))
 
-        ttk.Label(row3, text="연관:").grid(row=0, column=2, sticky='e', padx=(0, 5))
-        self.sub_keyword_entry = ttk.Entry(row3, width=40)
-        self.sub_keyword_entry.grid(row=0, column=3, sticky='w')
+        ttk.Label(sf_top, text="키워드그룹:").pack(side=tk.LEFT, padx=(0, 5))
+        self.safety_group_var = tk.StringVar()
+        self.safety_group_combo = ttk.Combobox(sf_top, textvariable=self.safety_group_var,
+                                                state='readonly', width=35)
+        self.safety_group_combo.pack(side=tk.LEFT, padx=(0, 10))
+        self.safety_group_var.trace_add('write', lambda *a: self._on_safety_group_changed())
 
-        ttk.Label(row3, text="상품 링크:").grid(row=1, column=0, sticky='e', padx=(0, 5), pady=(5, 0))
-        self.link_entry = ttk.Entry(row3, width=40)
-        self.link_entry.grid(row=1, column=1, sticky='w', pady=(5, 0))
+        self.safety_combo_label = ttk.Label(sf_top, text="강조점 조합: -", font=('맑은 고딕', 9, 'bold'))
+        self.safety_combo_label.pack(side=tk.LEFT, padx=(10, 0))
+
+        # 스크롤 가능한 미리보기
+        safety_preview_frame = ttk.Frame(safety_frame)
+        safety_preview_frame.pack(fill=tk.X)
+        self.safety_preview = tk.Text(safety_preview_frame, height=5, font=('맑은 고딕', 9),
+                                       wrap=tk.WORD, state='disabled', bg='#F5F5F5')
+        safety_preview_sb = ttk.Scrollbar(safety_preview_frame, orient=tk.VERTICAL,
+                                           command=self.safety_preview.yview)
+        self.safety_preview.configure(yscrollcommand=safety_preview_sb.set)
+        safety_preview_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.safety_preview.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # ── 원고 옵션 ──
         row4 = ttk.LabelFrame(sc, text="원고 옵션", padding=10)
         row4.pack(fill=tk.X, padx=10, pady=5)
 
         ttk.Label(row4, text="글자수:").grid(row=0, column=0, sticky='e', padx=(0, 5))
-        self.charcount_var = tk.StringVar(value="3000~3300")
+        self.charcount_var = tk.StringVar(value="2000~2300")
         ttk.Combobox(row4, textvariable=self.charcount_var, state='readonly', width=12,
                      values=["1500~1800", "2000~2300", "2500~2800", "3000~3300",
                              "3500~3800", "4000~4300", "4500~4800", "5100~5400"]).grid(row=0, column=1, sticky='w', padx=(0, 15))
@@ -230,9 +247,9 @@ class SafetyManuscriptApp:
         ttk.Entry(row4, textvariable=self.imgcount_var, width=6).grid(row=0, column=3, sticky='w', padx=(0, 15))
 
         ttk.Label(row4, text="강조 크기:").grid(row=0, column=4, sticky='e', padx=(0, 5))
-        self.emphasis_fontsize_var = tk.StringVar(value="14")
+        self.emphasis_fontsize_var = tk.StringVar(value="16")
         ttk.Combobox(row4, textvariable=self.emphasis_fontsize_var, state='readonly', width=5,
-                     values=["13", "14", "15", "16"]).grid(row=0, column=5, sticky='w')
+                     values=["11", "13", "15", "16", "19", "24", "28"]).grid(row=0, column=5, sticky='w')
 
         # ── 색상 규칙 ──
         row5 = ttk.LabelFrame(sc, text="색상 규칙", padding=10)
@@ -276,6 +293,9 @@ class SafetyManuscriptApp:
 
         self.safety_batch_btn = ttk.Button(btn, text="세트 배치", command=self._on_safety_batch)
         self.safety_batch_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.review_btn = ttk.Button(btn, text="검수", command=self._on_review)
+        self.review_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Button(btn, text="프롬프트 미리보기 (Ctrl+P)", command=self._on_preview).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(btn, text="Word 저장 (Ctrl+S)", command=self._on_save_docx).pack(side=tk.LEFT, padx=(0, 10))
@@ -404,6 +424,42 @@ class SafetyManuscriptApp:
     def _on_product_changed(self):
         self._update_safety_groups()
         self._update_refs()
+        self._update_product_link()
+
+    def _update_product_link(self):
+        """상품 링크 자동 생성 (추적 파라미터 포함)"""
+        product = self.product_var.get()
+        base_link = self.sheet_data.get("product_links", {}).get(product, "")
+        if not base_link:
+            self.link_entry.delete(0, tk.END)
+            return
+
+        product_code = get_product_code(product, self.sheet_data)
+
+        # nt_detail: 날짜 + 키워드 (띄어쓰기 제거)
+        date = self.date_var.get().strip()
+        keyword = self.keyword_entry.get().strip().split(',')[0].strip()
+        nt_detail = f"{date}{keyword}".replace(" ", "")
+
+        # nt_medium
+        nt_medium = self.nt_medium_var.get().strip()
+
+        # 링크 조립
+        params = "nt_source=blog"
+        if nt_medium:
+            params += f"&nt_medium={nt_medium}"
+        if nt_detail:
+            params += f"&nt_detail={nt_detail}"
+        if product_code:
+            params += f"&nt_keyword={product_code}"
+
+        full_link = f"{base_link}?{params}"
+        self.link_entry.delete(0, tk.END)
+        self.link_entry.insert(0, full_link)
+
+    def _build_product_link(self):
+        """상품링크 입력값 그대로 반환 (이미 _update_product_link에서 조립됨)"""
+        return self.link_entry.get().strip()
 
     def _update_safety_groups(self):
         product = self.product_var.get()
@@ -509,7 +565,7 @@ class SafetyManuscriptApp:
             "extra": self.extra_text.get('1.0', tk.END).strip(),
             "selected_refs": self.reference_files,
             "include_toc": self.toc_var.get(),
-            "product_link": self.link_entry.get().strip(),
+            "product_link": self._build_product_link(),
             "char_count": self.charcount_var.get(),
             "img_count": self.imgcount_var.get().strip(),
             "color_positive": self.color_positive_var.get(),
@@ -712,6 +768,7 @@ class SafetyManuscriptApp:
     def _set_buttons_state(self, state):
         self.generate_btn.config(state=state)
         self.safety_batch_btn.config(state=state)
+        self.review_btn.config(state=state)
 
     def _highlight_result(self):
         """결과 텍스트에 색상 태그 적용"""
@@ -727,3 +784,292 @@ class SafetyManuscriptApp:
                 self.result_text.tag_add("img_num", f"{i}.0", f"{i}.end")
             elif '★' in stripped:
                 self.result_text.tag_add("blogger_req", f"{i}.0", f"{i}.end")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 검수 (소구점/어색한 표현/서식 누락 체크)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def _on_review(self):
+        content = self.result_text.get('1.0', tk.END).strip()
+        if not content or len(content) < 100:
+            messagebox.showwarning("검수", "검수할 원고가 없습니다.\n원고를 먼저 생성해주세요.")
+            return
+        if self.is_generating:
+            messagebox.showinfo("진행 중", "생성이 진행 중입니다.")
+            return
+
+        api_key = self.api_key_var.get().strip()
+        if not api_key:
+            messagebox.showwarning("API Key", "설정 탭에서 Claude API Key를 입력해주세요.")
+            return
+
+        product = self.product_var.get()
+        product_guide = self.sheet_data["products"].get(product, "")
+        keywords = self.keyword_entry.get().strip()
+        sub_keywords = self.sub_keyword_entry.get().strip()
+
+        # 심의안전 소구점 정보도 포함
+        safety_entry = self._get_current_safety_entry()
+        review_prompt = self._build_review_prompt(content, product, product_guide,
+                                                   keywords, sub_keywords, safety_entry)
+
+        self.is_generating = True
+        self._set_buttons_state('disabled')
+        self.status_var.set("검수 중... (10~30초 소요)")
+
+        def on_review_complete(result):
+            def update():
+                self.is_generating = False
+                self._set_buttons_state('normal')
+                self.status_var.set("검수 완료")
+                self._show_review_dialog(result)
+            self.root.after(0, update)
+
+        def on_review_error(err):
+            def update():
+                self.is_generating = False
+                self._set_buttons_state('normal')
+                self.status_var.set("검수 오류")
+                messagebox.showerror("검수 오류", f"검수 중 오류가 발생했습니다:\n{err}")
+            self.root.after(0, update)
+
+        threading.Thread(target=call_claude_api,
+                         args=(api_key, review_prompt, on_review_complete, on_review_error, 4096),
+                         daemon=True).start()
+
+    def _build_review_prompt(self, manuscript, product, product_guide,
+                              keywords, sub_keywords, safety_entry=None):
+        parts = [
+            "당신은 건강/의학 마케팅 블로그 원고 검수 전문가입니다.",
+            "아래 원고를 검수하여 문제점을 찾아주세요.",
+            "이 원고는 '심의안전' 원고로, 제품명을 직접 언급하지 않고 간접적으로 소구하는 방식입니다.",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "■ 검수 항목",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            "【1. 소구점 반영 검수】",
+            "- 제품 가이드에 명시된 핵심 소구점이 원고에 빠짐없이 반영되었는지 확인",
+            "- 심의안전 강조점이 자연스럽게 녹아들었는지 확인",
+            "- 누락된 소구점이 있으면 구체적으로 어떤 소구점이 빠졌는지 지적",
+            "",
+            "【2. 어색한 표현 검수】",
+            "- 문맥상 어색하거나 부자연스러운 표현 지적",
+            "- 과장되거나 비현실적인 표현 지적",
+            "- 맞춤법/문법 오류 지적",
+            "- 같은 표현이 과도하게 반복되는 부분 지적",
+            "- 문장 간 논리적 흐름이 어색한 부분 지적",
+            "",
+            "【3. 서식 누락 검수】",
+            "- 'ㄴ' 서식 지시가 적절히 들어갔는지 확인",
+            "- 이미지 번호(0, 1, 2...)가 순서대로 있는지 확인",
+            "- ★블로거 요청사항★ 섹션이 있는지 확인",
+            "- 인용구, 볼드, 색상 등 서식 지시가 누락된 곳이 있는지 확인",
+            "- 해시태그는 ★블로거 요청사항★ 안에만 있으면 정상입니다.",
+            "",
+            "【4. 심의안전 검수】",
+            "- 제품명이 본문에 직접 노출되지 않았는지 확인",
+            "- 의약품/건기식 심의 위반 표현이 없는지 확인 (확정적 효능 표현, 진단/치료 암시 등)",
+            "- 병원 진료 권고가 적절히 포함되었는지 확인",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "■ 검수 대상 정보",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        ]
+
+        if product:
+            parts.append(f"\n[제품명] {product}")
+        if product_guide:
+            parts.append(f"\n[제품 가이드 (소구점 기준)]\n{product_guide[:5000]}")
+        if safety_entry:
+            combo = safety_entry.get("combo", "")
+            active_keys = [k.strip() for k in combo.split("+") if k.strip()]
+            safety_points = []
+            for key in active_keys:
+                content = safety_entry["points"].get(key, "")
+                if content:
+                    safety_points.append(f"  {key}: {content}")
+            if safety_points:
+                parts.append(f"\n[심의안전 강조점] 조합: {combo}")
+                parts.extend(safety_points)
+        if keywords:
+            parts.append(f"\n[메인 키워드] {keywords}")
+        if sub_keywords:
+            parts.append(f"\n[연관 키워드] {sub_keywords}")
+
+        parts.append(f"\n[원고 전문]\n{manuscript}")
+
+        parts.extend([
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "■ 검수 결과 작성 형식",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            "아래 형식으로 검수 결과를 작성해주세요:",
+            "",
+            "【1. 소구점 반영 검수】",
+            "✅ 반영된 소구점: (목록)",
+            "❌ 누락된 소구점: (목록, 없으면 '없음')",
+            "💡 개선 제안: (있으면 작성)",
+            "",
+            "【2. 어색한 표현 검수】",
+            "각 문제마다:",
+            "- 위치: (해당 문장 인용)",
+            "- 문제: (어떤 점이 어색한지)",
+            "- 수정안: (개선된 문장)",
+            "",
+            "【3. 서식 누락 검수】",
+            "- 이미지 번호: (순서 확인 결과)",
+            "- ㄴ 서식 지시: (누락 여부)",
+            "- ★블로거 요청사항★: (존재 여부)",
+            "- 기타 서식 문제: (있으면 작성)",
+            "",
+            "【4. 심의안전 검수】",
+            "- 제품명 노출: (있으면 위치 지적)",
+            "- 심의 위반 표현: (있으면 지적 + 수정안)",
+            "- 병원 진료 권고: (포함 여부)",
+            "",
+            "【종합 평가】",
+            "- 총점: __/100",
+            "- 한줄 요약: (원고의 전반적 품질 평가)",
+        ])
+
+        return "\n".join(parts)
+
+    def _show_review_dialog(self, review_result):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("검수 결과")
+        dialog.geometry("900x700")
+        dialog.transient(self.root)
+
+        ttk.Label(dialog, text="검수 결과",
+                  font=('맑은 고딕', 13, 'bold')).pack(pady=(15, 10), padx=15)
+
+        text_frame = ttk.Frame(dialog)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
+
+        review_text = scrolledtext.ScrolledText(text_frame, wrap=tk.WORD,
+                                                 font=('맑은 고딕', 10), height=30)
+        review_text.pack(fill=tk.BOTH, expand=True)
+        review_text.insert('1.0', review_result)
+
+        # 검수 결과 하이라이트
+        for tag_name, pattern, fg_color in [
+            ("header", r'【.+?】', '#1a237e'),
+            ("pass", r'✅.*', '#2e7d32'),
+            ("fail", r'❌.*', '#c62828'),
+            ("tip", r'💡.*', '#e65100'),
+        ]:
+            review_text.tag_configure(tag_name, foreground=fg_color, font=('맑은 고딕', 10, 'bold'))
+            content = review_text.get('1.0', tk.END)
+            for m in re.finditer(pattern, content):
+                line_num = content[:m.start()].count('\n') + 1
+                col_start = m.start() - content.rfind('\n', 0, m.start()) - 1
+                col_end = col_start + len(m.group())
+                review_text.tag_add(tag_name, f"{line_num}.{col_start}", f"{line_num}.{col_end}")
+
+        ttk.Label(dialog, text="검수 내용을 직접 수정한 후 '수정 재생성'을 누르세요",
+                  font=('맑은 고딕', 9), foreground='#666').pack(padx=15, pady=(0, 5))
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(fill=tk.X, padx=15, pady=(0, 15))
+
+        def copy_result():
+            content = review_text.get('1.0', tk.END).strip()
+            dialog.clipboard_clear()
+            dialog.clipboard_append(content)
+            messagebox.showinfo("복사", "검수 결과가 클립보드에 복사되었습니다.", parent=dialog)
+
+        def on_revise():
+            edited_review = review_text.get('1.0', tk.END).strip()
+            if not edited_review:
+                messagebox.showwarning("검수", "검수 내용이 비어있습니다.", parent=dialog)
+                return
+            dialog.destroy()
+            self._revise_manuscript(edited_review)
+
+        ttk.Button(btn_frame, text="수정 재생성", style='Generate.TButton',
+                   command=on_revise).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(btn_frame, text="결과 복사", command=copy_result).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(btn_frame, text="닫기", command=dialog.destroy).pack(side=tk.LEFT)
+
+    def _revise_manuscript(self, review_result):
+        """검수 결과를 기반으로 원고 수정 재생성"""
+        original = self.result_text.get('1.0', tk.END).strip()
+        api_key = self.api_key_var.get().strip()
+
+        if not original or not api_key:
+            return
+
+        revise_prompt = self._build_revise_prompt(original, review_result)
+
+        self.is_generating = True
+        self._set_buttons_state('disabled')
+        self.result_text.delete('1.0', tk.END)
+        self.result_text.insert('1.0', "검수 기반 수정 재생성 중... (30초~2분 소요)")
+        self.status_var.set("수정 재생성 중...")
+
+        def on_complete(result):
+            def update():
+                clean = result.replace('**', '')
+                clean = re.sub(r'^ㄴ\s*\([^)]+\)\s*$', '', clean, flags=re.MULTILINE)
+                clean = re.sub(r'^0(\d)$', r'\1', clean, flags=re.MULTILINE)
+
+                self.result_text.delete('1.0', tk.END)
+                self.result_text.insert('1.0', clean)
+                self._highlight_result()
+                self.is_generating = False
+                self._set_buttons_state('normal')
+
+                auto_path = self._auto_save(clean, {"product": self.product_var.get(),
+                                                      "prompt_type": self.prompt_var.get()})
+                char_count = len(clean)
+                self.status_var.set(f"수정 완료! ({char_count:,}자) — {os.path.basename(auto_path)}")
+            self.root.after(0, update)
+
+        def on_error(err):
+            def update():
+                self.result_text.delete('1.0', tk.END)
+                self.result_text.insert('1.0', f"수정 재생성 오류:\n{err}")
+                self.status_var.set("오류 발생")
+                self.is_generating = False
+                self._set_buttons_state('normal')
+            self.root.after(0, update)
+
+        threading.Thread(target=call_claude_api,
+                         args=(api_key, revise_prompt, on_complete, on_error, 8192),
+                         daemon=True).start()
+
+    def _build_revise_prompt(self, original_manuscript, review_result):
+        parts = [
+            "당신은 건강/의학 마케팅 블로그 원고 수정 전문가입니다.",
+            "",
+            "아래 원고를 검수 결과에 따라 수정해주세요.",
+            "이 원고는 '심의안전' 원고로, 제품명을 직접 언급하지 않고 간접적으로 소구하는 방식입니다.",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "■ 수정 규칙",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            "1. 검수에서 지적된 문제점만 수정합니다.",
+            "2. 문제가 없는 부분은 원문 그대로 유지합니다.",
+            "3. 원고의 전체 구조, 서식(ㄴ 지시, 이미지 번호, ★블로거 요청사항★)을 그대로 유지합니다.",
+            "4. 누락된 소구점이 있으면 자연스럽게 녹여 넣습니다.",
+            "5. 어색한 표현은 검수의 수정안을 참고하여 고칩니다.",
+            "6. 서식 누락이 있으면 보완합니다.",
+            "7. 제품명을 직접 노출하지 않습니다 (심의안전 원칙).",
+            "8. 수정된 원고 전문만 출력합니다. 설명이나 주석은 붙이지 마세요.",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "■ 검수 결과 (수정해야 할 사항)",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            review_result,
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "■ 원본 원고 (이것을 수정해주세요)",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            original_manuscript,
+        ]
+        return "\n".join(parts)
