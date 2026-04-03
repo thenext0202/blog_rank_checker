@@ -346,11 +346,13 @@ def review_manuscript(folder_name):
     # 이미지 체크
     referenced_nums = set()
     for idx, text in paragraphs:
-        if re.match(r"^\d+$", text):
-            if int(text) <= 30:
-                referenced_nums.add(text)
-        elif re.match(r"^\d+[\s,、]+\d+", text):
-            for m in re.finditer(r"\d+", text):
+        # 쉼표 포함 숫자(1,000 / 2,000 등)는 이미지 번호가 아님 — 제거 후 판단
+        cleaned = re.sub(r"\d{1,3}(,\d{3})+", "", text).strip()
+        if re.match(r"^\d+$", cleaned):
+            if int(cleaned) <= 30:
+                referenced_nums.add(cleaned)
+        elif re.match(r"^\d+[\s、]+\d+", cleaned):
+            for m in re.finditer(r"\d+", cleaned):
                 if int(m.group()) <= 30:
                     referenced_nums.add(m.group())
 
@@ -386,10 +388,10 @@ def review_manuscript(folder_name):
                     break
             if any(kw in next_text for kw in link_ok_keywords):
                 result["link_ok"].append(
-                    f"링크({text[:60]}...): OK ({next_text[:30]})")
+                    f"링크({text}): OK ({next_text[:30]})")
             else:
                 result["link_issues"].append(
-                    f"링크({text[:60]}...): 링크 삽입 멘트 없음"
+                    f"링크({text}): 링크 삽입 멘트 없음"
                 )
 
     # 광고 이미지 체크
@@ -502,6 +504,7 @@ class ManuscriptAssignerApp:
         self.publish_row_map = {}
         self.param_updates = []
         self.written_rows = []  # Step 1 시트 기입 행 번호 (취소용)
+        self._write_stop = False  # Step 1 시트 기입 중지 플래그
         self.exclusions = load_exclusions()
 
         self._setup_styles()
@@ -672,6 +675,9 @@ class ManuscriptAssignerApp:
         plan_btn_frame.pack(fill="x", pady=(8, 0))
         ttk.Button(plan_btn_frame, text="시트 기입 + 불러오기",
                    command=self._write_plan_and_load).pack(side="left")
+        self.stop_write_btn = ttk.Button(plan_btn_frame, text="■ 중지",
+                                          command=self._stop_write, state="disabled")
+        self.stop_write_btn.pack(side="left", padx=5)
         self.plan_status = tk.StringVar(value="")
         ttk.Label(plan_btn_frame, textvariable=self.plan_status).pack(side="left", padx=10)
 
@@ -702,6 +708,12 @@ class ManuscriptAssignerApp:
                                                     font=("맑은 고딕", 9))
         self.step1_log.pack(fill="x", pady=(5, 0))
 
+    def _stop_write(self):
+        """시트 기입 중지."""
+        self._write_stop = True
+        self.stop_write_btn.configure(state="disabled")
+        self.plan_status.set("중지 요청됨...")
+
     def _write_plan_and_load(self):
         """발행 계획 기입 + 발행리스트 불러오기 통합.
         건수가 모두 0이면 기입 없이 불러오기만 실행."""
@@ -723,7 +735,9 @@ class ManuscriptAssignerApp:
             f"자사 발행리스트에 기입합니다."):
             return
 
+        self._write_stop = False
         self.plan_status.set("시트 확인 중...")
+        self.stop_write_btn.configure(state="normal")
         date_str = date_to_md(self.target_date)
 
         def worker():
@@ -736,6 +750,7 @@ class ManuscriptAssignerApp:
                                      if a.strip() == date_str and n.strip())
                 if existing_count > 0:
                     self.root.after(0, lambda: self.plan_status.set(""))
+                    self.root.after(0, lambda: self.stop_write_btn.configure(state="disabled"))
                     def _ask_existing():
                         if messagebox.askyesno("경고",
                             f"[{date_str}] 날짜에 이미 {existing_count}건이 있습니다.\n"
@@ -755,23 +770,44 @@ class ManuscriptAssignerApp:
 
                 # A열(날짜)과 N열(발행처)만 개별 기입 (다른 열 수식 보호)
                 row_idx = start_row
+                written_count = 0
                 for company, count in plan.items():
                     for _ in range(count):
+                        if self._write_stop:
+                            break
                         ws.update(f"A{row_idx}", [[date_str]], value_input_option="USER_ENTERED")
                         ws.update(f"N{row_idx}", [[company]], value_input_option="USER_ENTERED")
                         row_idx += 1
-                total_written = row_idx - start_row
+                        written_count += 1
+                        self.root.after(0, lambda wc=written_count:
+                            self.plan_status.set(f"기입 중... {wc}/{total}건"))
+                    if self._write_stop:
+                        break
+
                 self.written_rows = list(range(start_row, row_idx))
-                self.root.after(0, lambda:
-                    self.cancel_write_btn.configure(state="normal"))
-                self.root.after(0, lambda:
-                    self.plan_status.set(f"✓ {total}건 기입 완료"))
-                self.root.after(0, lambda:
-                    self._log(self.step1_log,
-                        f"발행 계획 기입: {date_str} 총 {total}건\n{msg}"))
-                # 기입 완료 후 자동으로 발행리스트 불러오기
-                self.root.after(500, self._load_publish_data)
+                self.root.after(0, lambda: self.stop_write_btn.configure(state="disabled"))
+
+                if self._write_stop:
+                    # 중지됨 — 이미 기입된 행만 기록
+                    self.root.after(0, lambda:
+                        self.cancel_write_btn.configure(state="normal"))
+                    self.root.after(0, lambda wc=written_count:
+                        self.plan_status.set(f"⚠ 중지됨 ({wc}/{total}건 기입)"))
+                    self.root.after(0, lambda wc=written_count:
+                        self._log(self.step1_log,
+                            f"발행 계획 기입 중지: {date_str} {wc}/{total}건"))
+                else:
+                    self.root.after(0, lambda:
+                        self.cancel_write_btn.configure(state="normal"))
+                    self.root.after(0, lambda:
+                        self.plan_status.set(f"✓ {total}건 기입 완료"))
+                    self.root.after(0, lambda:
+                        self._log(self.step1_log,
+                            f"발행 계획 기입: {date_str} 총 {total}건\n{msg}"))
+                    # 기입 완료 후 자동으로 발행리스트 불러오기
+                    self.root.after(500, self._load_publish_data)
             except Exception as e:
+                self.root.after(0, lambda: self.stop_write_btn.configure(state="disabled"))
                 self.root.after(0, lambda:
                     self.plan_status.set(f"✗ 오류: {e}"))
         threading.Thread(target=worker, daemon=True).start()
