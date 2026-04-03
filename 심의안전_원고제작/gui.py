@@ -39,12 +39,6 @@ class SafetyManuscriptApp:
         self.reference_files = {}
         self.is_generating = False
         self.spreadsheet = None
-        self.batch_count = 0
-        self.batch_current = 0
-        self._safety_batch_appeals = []
-        self._safety_batch_count = 0
-        self._safety_batch_current = 0
-
         self._setup_styles()
         self._build_ui()
         self._bind_shortcuts()
@@ -205,23 +199,10 @@ class SafetyManuscriptApp:
         ttk.Checkbutton(row2, text="제목 3번 반복", variable=self.title_repeat_var).grid(row=0, column=col, sticky='w')
 
         # ── 심의안전: 키워드그룹 & 강조점 ──
-        safety_frame = ttk.LabelFrame(sc, text="심의안전 — 키워드그룹 & 강조점", padding=10)
+        safety_frame = ttk.LabelFrame(sc, text="심의안전 — 소구점 (Claude가 키워드에 맞게 선택)", padding=10)
         safety_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        sf_top = ttk.Frame(safety_frame)
-        sf_top.pack(fill=tk.X, pady=(0, 5))
-
-        ttk.Label(sf_top, text="키워드그룹:").pack(side=tk.LEFT, padx=(0, 5))
-        self.safety_group_var = tk.StringVar()
-        self.safety_group_combo = ttk.Combobox(sf_top, textvariable=self.safety_group_var,
-                                                state='readonly', width=35)
-        self.safety_group_combo.pack(side=tk.LEFT, padx=(0, 10))
-        self.safety_group_var.trace_add('write', lambda *a: self._on_safety_group_changed())
-
-        self.safety_combo_label = ttk.Label(sf_top, text="강조점 조합: -", font=('맑은 고딕', 9, 'bold'))
-        self.safety_combo_label.pack(side=tk.LEFT, padx=(10, 0))
-
-        # 스크롤 가능한 미리보기
+        # 소구점 미리보기
         safety_preview_frame = ttk.Frame(safety_frame)
         safety_preview_frame.pack(fill=tk.X)
         self.safety_preview = tk.Text(safety_preview_frame, height=5, font=('맑은 고딕', 9),
@@ -254,7 +235,7 @@ class SafetyManuscriptApp:
         # ── 색상 규칙 ──
         row5 = ttk.LabelFrame(sc, text="색상 규칙", padding=10)
         row5.pack(fill=tk.X, padx=10, pady=5)
-        colors = ["빨간색", "파란색", "청록색", "초록색", "보라색", "주황색"]
+        colors = ["없음", "빨간색", "파란색", "청록색", "초록색", "보라색", "주황색"]
         highlights = ["없음", "노란 형광펜", "파란 형광펜", "초록 형광펜", "빨간 형광펜"]
 
         ttk.Label(row5, text="긍정:").grid(row=0, column=0, sticky='e', padx=(0, 5))
@@ -270,11 +251,11 @@ class SafetyManuscriptApp:
         ttk.Combobox(row5, textvariable=self.highlight_emphasis_var, state='readonly', width=12, values=highlights).grid(row=0, column=5, sticky='w', padx=(0, 10))
 
         ttk.Label(row5, text="제품색:").grid(row=0, column=6, sticky='e', padx=(0, 5))
-        self.color_product_var = tk.StringVar(value="청록색")
+        self.color_product_var = tk.StringVar(value="없음")
         ttk.Combobox(row5, textvariable=self.color_product_var, state='readonly', width=8, values=colors).grid(row=0, column=7, sticky='w', padx=(0, 10))
 
         ttk.Label(row5, text="제품 형광:").grid(row=0, column=8, sticky='e', padx=(0, 5))
-        self.highlight_product_var = tk.StringVar(value="노란 형광펜")
+        self.highlight_product_var = tk.StringVar(value="없음")
         ttk.Combobox(row5, textvariable=self.highlight_product_var, state='readonly', width=12, values=highlights).grid(row=0, column=9, sticky='w')
 
         # ── 추가 지시사항 ──
@@ -291,8 +272,6 @@ class SafetyManuscriptApp:
         self.generate_btn = ttk.Button(btn, text="원고 생성 (Ctrl+G)", style='Generate.TButton', command=self._on_generate)
         self.generate_btn.pack(side=tk.LEFT, padx=(0, 10))
 
-        self.safety_batch_btn = ttk.Button(btn, text="세트 배치", command=self._on_safety_batch)
-        self.safety_batch_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         self.review_btn = ttk.Button(btn, text="검수", command=self._on_review)
         self.review_btn.pack(side=tk.LEFT, padx=(0, 10))
@@ -422,7 +401,7 @@ class SafetyManuscriptApp:
         self.style_combo.current(0)
 
     def _on_product_changed(self):
-        self._update_safety_groups()
+        self._update_safety_preview()
         self._update_refs()
         self._update_product_link()
 
@@ -461,45 +440,17 @@ class SafetyManuscriptApp:
         """상품링크 입력값 그대로 반환 (이미 _update_product_link에서 조립됨)"""
         return self.link_entry.get().strip()
 
-    def _update_safety_groups(self):
+    def _update_safety_preview(self):
         product = self.product_var.get()
-        appeals = self.sheet_data.get("safety_appeals", {}).get(product, [])
-        groups = [a["group"] for a in appeals]
-        self.safety_group_combo['values'] = groups
-        if groups:
-            self.safety_group_combo.current(0)
-        else:
-            self.safety_group_var.set("")
-            self._on_safety_group_changed()
-
-    def _on_safety_group_changed(self):
-        entry = self._get_current_safety_entry()
+        points = self.sheet_data.get("safety_appeals", {}).get(product, [])
         self.safety_preview.config(state='normal')
         self.safety_preview.delete('1.0', tk.END)
-
-        if entry:
-            combo = entry.get("combo", "-")
-            self.safety_combo_label.config(text=f"강조점 조합: {combo}")
-            active_keys = [k.strip() for k in combo.split("+") if k.strip()]
-            lines = []
-            for key in active_keys:
-                content = entry["points"].get(key, "")
-                if content:
-                    lines.append(f"[강조점 {key}] {content}")
-            self.safety_preview.insert('1.0', "\n\n".join(lines) if lines else "(강조점 없음)")
+        if points:
+            lines = [f"{i+1}. {p}" for i, p in enumerate(points)]
+            self.safety_preview.insert('1.0', "\n".join(lines))
         else:
-            self.safety_combo_label.config(text="강조점 조합: -")
-            self.safety_preview.insert('1.0', "(키워드그룹을 선택하세요)")
-
+            self.safety_preview.insert('1.0', "(이 제품의 소구점이 없습니다)")
         self.safety_preview.config(state='disabled')
-
-    def _get_current_safety_entry(self):
-        product = self.product_var.get()
-        group = self.safety_group_var.get()
-        for a in self.sheet_data.get("safety_appeals", {}).get(product, []):
-            if a["group"] == group:
-                return a
-        return None
 
     def _update_refs(self):
         product = self.product_var.get()
@@ -521,11 +472,9 @@ class SafetyManuscriptApp:
         lines.append(f"\n══ 심의안전 프롬프트 ({len(sp)}개) ══")
         for name in sp:
             lines.append(f"  ▶ {name}")
-        total_groups = sum(len(v) for v in sa.values())
-        lines.append(f"\n══ 심의안전 소구점 ({len(sa)}개 제품, {total_groups}개 그룹) ══")
-        for pname, groups in sa.items():
-            group_names = [g["group"] for g in groups]
-            lines.append(f"  ▶ {pname}: {', '.join(group_names)}")
+        lines.append(f"\n══ 심의안전 소구점 ({len(sa)}개 제품) ══")
+        for pname, points in sa.items():
+            lines.append(f"  ▶ {pname}: {len(points)}개 소구점")
 
         lines.append(f"\n══ 스타일 ({len(d['styles'])}개) ══")
         paper_count = sum(len(v) for v in d.get('papers', {}).values())
@@ -575,7 +524,7 @@ class SafetyManuscriptApp:
             "highlight_product": self.highlight_product_var.get(),
             "title_repeat": self.title_repeat_var.get(),
             "emphasis_fontsize": self.emphasis_fontsize_var.get(),
-            "safety_appeal_entry": self._get_current_safety_entry(),
+            "safety_appeal_points": self.sheet_data.get("safety_appeals", {}).get(self.product_var.get(), []),
         }
 
     def _on_preview(self):
@@ -603,10 +552,10 @@ class SafetyManuscriptApp:
             color_product=inp["color_product"], highlight_product=inp["highlight_product"],
             title_repeat=inp["title_repeat"],
             emphasis_fontsize=inp["emphasis_fontsize"],
-            safety_appeal_entry=inp.get("safety_appeal_entry"),
+            safety_appeal_points=inp.get("safety_appeal_points"),
         )
 
-    def _on_generate(self, is_batch=False):
+    def _on_generate(self):
         """바로 원고 생성 (페르소나/제목 단계 없음 — 프롬프트에 제목 패턴 포함)"""
         if self.is_generating:
             messagebox.showinfo("진행 중", "생성이 진행 중입니다.")
@@ -625,9 +574,8 @@ class SafetyManuscriptApp:
         self._set_buttons_state('disabled')
         self.result_text.delete('1.0', tk.END)
 
-        batch_info = f" ({self.batch_current}/{self.batch_count})" if is_batch else ""
-        self.result_text.insert('1.0', f"원고 생성 중...{batch_info} (30초~2분)")
-        self.status_var.set(f"원고 생성 중...{batch_info}")
+        self.result_text.insert('1.0', "원고 생성 중... (30초~2분)")
+        self.status_var.set("원고 생성 중...")
 
         def on_complete(result):
             def update():
@@ -645,9 +593,6 @@ class SafetyManuscriptApp:
                 char_count = len(clean)
                 self.status_var.set(f"생성 완료! ({char_count:,}자) — {os.path.basename(auto_path)}")
 
-                if is_batch and self.batch_current < self.batch_count:
-                    if self._safety_batch_count > 0:
-                        self.root.after(500, self._safety_batch_next)
             self.root.after(0, update)
 
         def on_error(err):
@@ -656,7 +601,6 @@ class SafetyManuscriptApp:
                 self.result_text.insert('1.0', f"오류:\n{err}")
                 self.is_generating = False
                 self._set_buttons_state('normal')
-                self.batch_count = 0
             self.root.after(0, update)
 
         threading.Thread(target=call_claude_api,
@@ -666,54 +610,6 @@ class SafetyManuscriptApp:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # 세트 배치 생성
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    def _on_safety_batch(self):
-        if self.is_generating:
-            messagebox.showinfo("진행 중", "생성이 진행 중입니다.")
-            return
-        product = self.product_var.get()
-        appeals = self.sheet_data.get("safety_appeals", {}).get(product, [])
-        if not appeals:
-            messagebox.showwarning("소구점 없음", f"'{product}'의 심의안전 소구점이 없습니다.")
-            return
-        if not self.keyword_entry.get().strip():
-            messagebox.showwarning("키워드", "메인 키워드를 입력해주세요.")
-            return
-
-        group_names = [a["group"] for a in appeals]
-        msg = (f"'{product}' 세트 배치 ({len(appeals)}개 그룹)\n\n" +
-               "\n".join(f"  {i+1}. {g}" for i, g in enumerate(group_names)) +
-               "\n\n각 그룹마다 페르소나/제목을 선택합니다.")
-
-        if not messagebox.askyesno("세트 배치", msg):
-            return
-
-        self._safety_batch_appeals = appeals
-        self._safety_batch_count = len(appeals)
-        self._safety_batch_current = 0
-        self.batch_count = self._safety_batch_count
-        self.batch_current = 0
-        self._safety_batch_next()
-
-    def _safety_batch_next(self):
-        if self._safety_batch_current >= self._safety_batch_count:
-            total = self._safety_batch_count
-            self._safety_batch_appeals = []
-            self._safety_batch_count = 0
-            self._safety_batch_current = 0
-            self.batch_count = 0
-            self.batch_current = 0
-            self.status_var.set(f"세트 배치 완료! (총 {total}개)")
-            messagebox.showinfo("세트 배치 완료", f"모든 원고가 생성되었습니다! (총 {total}개)")
-            return
-
-        entry = self._safety_batch_appeals[self._safety_batch_current]
-        self.safety_group_var.set(entry["group"])
-        self._on_safety_group_changed()
-        self._safety_batch_current += 1
-        self.batch_current = self._safety_batch_current
-        self.status_var.set(f"세트 배치 {self.batch_current}/{self._safety_batch_count} — {entry['group']}")
-        self._on_generate(is_batch=True)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # 저장
@@ -730,6 +626,21 @@ class SafetyManuscriptApp:
             f.write(text)
         return fpath
 
+    def _make_filename(self, ext):
+        """파일명 생성: 이름_날짜키워드_원고유형"""
+        author = self.author_var.get().strip() or "작가"
+        date = self.date_var.get().strip()
+        keyword = self.keyword_entry.get().strip().split(',')[0].strip().replace(' ', '')
+        # 원고유형 축약 (긴 이름에서 핵심만)
+        ptype = self.prompt_var.get().strip()
+        short_type_map = {
+            '심의 안전형': '심의형',
+            '정보 탐색 큐레이션형': '큐레이션형',
+            '제3자 관찰형': '제3자형',
+        }
+        ptype_short = short_type_map.get(ptype, ptype)
+        return f"{author}_{date}{keyword[:15]}_{ptype_short}{ext}"
+
     def _on_save_docx(self):
         content = self.result_text.get('1.0', tk.END).strip()
         if not content or len(content) < 50:
@@ -739,11 +650,12 @@ class SafetyManuscriptApp:
             initialdir=OUTPUT_DIR,
             defaultextension=".docx",
             filetypes=[("Word 문서", "*.docx")],
-            initialfile=f"심의_{self.date_var.get()}_{self.keyword_entry.get()[:15]}.docx"
+            initialfile=self._make_filename(".docx")
         )
         if fpath:
             save_as_docx(content, fpath)
             self.status_var.set(f"Word 저장 완료: {os.path.basename(fpath)}")
+            os.startfile(fpath)
 
     def _on_save_txt(self):
         content = self.result_text.get('1.0', tk.END).strip()
@@ -754,7 +666,7 @@ class SafetyManuscriptApp:
             initialdir=OUTPUT_DIR,
             defaultextension=".txt",
             filetypes=[("텍스트", "*.txt")],
-            initialfile=f"심의_{self.date_var.get()}_{self.keyword_entry.get()[:15]}.txt"
+            initialfile=self._make_filename(".txt")
         )
         if fpath:
             with open(fpath, 'w', encoding='utf-8') as f:
@@ -767,7 +679,6 @@ class SafetyManuscriptApp:
 
     def _set_buttons_state(self, state):
         self.generate_btn.config(state=state)
-        self.safety_batch_btn.config(state=state)
         self.review_btn.config(state=state)
 
     def _highlight_result(self):
@@ -809,9 +720,9 @@ class SafetyManuscriptApp:
         sub_keywords = self.sub_keyword_entry.get().strip()
 
         # 심의안전 소구점 정보도 포함
-        safety_entry = self._get_current_safety_entry()
+        safety_points = self.sheet_data.get("safety_appeals", {}).get(product, [])
         review_prompt = self._build_review_prompt(content, product, product_guide,
-                                                   keywords, sub_keywords, safety_entry)
+                                                   keywords, sub_keywords, safety_points)
 
         self.is_generating = True
         self._set_buttons_state('disabled')
@@ -838,7 +749,7 @@ class SafetyManuscriptApp:
                          daemon=True).start()
 
     def _build_review_prompt(self, manuscript, product, product_guide,
-                              keywords, sub_keywords, safety_entry=None):
+                              keywords, sub_keywords, safety_points=None):
         parts = [
             "당신은 건강/의학 마케팅 블로그 원고 검수 전문가입니다.",
             "아래 원고를 검수하여 문제점을 찾아주세요.",
@@ -865,7 +776,7 @@ class SafetyManuscriptApp:
             "- 이미지 번호(0, 1, 2...)가 순서대로 있는지 확인",
             "- ★블로거 요청사항★ 섹션이 있는지 확인",
             "- 인용구, 볼드, 색상 등 서식 지시가 누락된 곳이 있는지 확인",
-            "- 해시태그는 ★블로거 요청사항★ 안에만 있으면 정상입니다.",
+            "- 해시태그가 원고 어디에도 포함되지 않았는지 확인",
             "",
             "【4. 심의안전 검수】",
             "- 제품명이 본문에 직접 노출되지 않았는지 확인",
@@ -881,17 +792,10 @@ class SafetyManuscriptApp:
             parts.append(f"\n[제품명] {product}")
         if product_guide:
             parts.append(f"\n[제품 가이드 (소구점 기준)]\n{product_guide[:5000]}")
-        if safety_entry:
-            combo = safety_entry.get("combo", "")
-            active_keys = [k.strip() for k in combo.split("+") if k.strip()]
-            safety_points = []
-            for key in active_keys:
-                content = safety_entry["points"].get(key, "")
-                if content:
-                    safety_points.append(f"  {key}: {content}")
-            if safety_points:
-                parts.append(f"\n[심의안전 강조점] 조합: {combo}")
-                parts.extend(safety_points)
+        if safety_points:
+            parts.append("\n[심의안전 소구점]")
+            for i, pt in enumerate(safety_points, 1):
+                parts.append(f"  {i}. {pt}")
         if keywords:
             parts.append(f"\n[메인 키워드] {keywords}")
         if sub_keywords:

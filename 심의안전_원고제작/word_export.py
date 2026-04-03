@@ -123,18 +123,43 @@ def _get_color_name_to_rgb():
     }
 
 
+def _make_flexible_pattern(word):
+    """단어 내 공백을 \\s+로 치환하여 유연한 매칭 패턴 생성"""
+    parts = word.split()
+    if len(parts) <= 1:
+        return re.escape(word)
+    return r'\s+'.join(re.escape(p) for p in parts)
+
+
+def _word_in_text(word, text):
+    """유연한 단어 존재 확인 (공백 차이 허용)"""
+    if word in text:
+        return True
+    return bool(re.search(_make_flexible_pattern(word), text))
+
+
+def _has_markdown_bold(text):
+    """텍스트에 마크다운 볼드(**...**)가 포함되어 있는지 확인"""
+    return bool(re.search(r'\*\*(.+?)\*\*', text))
+
+
 def _split_colored_words_across_targets(targets, colored_words):
     """colored_words가 여러 문단에 걸칠 때 문단별로 분리"""
     if not colored_words or len(targets) <= 1:
         return None
-    spanning = [w for w, _ in colored_words if not any(w in t for _, t in targets)]
+    spanning = [w for w, _ in colored_words if not any(_word_in_text(w, t) for _, t in targets)]
     if not spanning:
         return None
 
     joined = ' '.join(t for _, t in targets)
     char_colors = [None] * len(joined)
     for word, color_name in colored_words:
-        for m in re.finditer(re.escape(word), joined):
+        pattern = re.escape(word)
+        matches = list(re.finditer(pattern, joined))
+        if not matches:
+            pattern = _make_flexible_pattern(word)
+            matches = list(re.finditer(pattern, joined))
+        for m in matches:
             for j in range(m.start(), m.end()):
                 char_colors[j] = color_name
 
@@ -183,7 +208,12 @@ def _build_styled_segments(original_text, colored_words):
     visible_text = ''.join(c[0] for c in chunks)
     char_colors = [None] * len(visible_text)
     for word, color_name in colored_words:
-        for m in re.finditer(re.escape(word), visible_text):
+        pattern = re.escape(word)
+        matches = list(re.finditer(pattern, visible_text))
+        if not matches:
+            pattern = _make_flexible_pattern(word)
+            matches = list(re.finditer(pattern, visible_text))
+        for m in matches:
             for j in range(m.start(), m.end()):
                 char_colors[j] = color_name
 
@@ -362,20 +392,28 @@ def save_as_docx(text, filepath):
             _add_text_runs(p, content_part)
             recent.append((p, content_part))
             mid_fmt = parse_annotation(ann_part)
+            # 본문에 마크다운 볼드가 있으면 mid_fmt에 bold 보충
+            if not mid_fmt.get('bold') and _has_markdown_bold(content_part):
+                mid_fmt['bold'] = True
             if mid_fmt.get('colored_words'):
-                if all(w in content_part for w, _ in mid_fmt['colored_words']):
+                if all(_word_in_text(w, content_part) for w, _ in mid_fmt['colored_words']):
                     _apply_formatting_to_para(p, content_part, mid_fmt)
                 else:
                     pending_fmts.append((mid_fmt, []))
             elif not mid_fmt['is_image_desc']:
                 _apply_formatting_to_para(p, content_part, mid_fmt)
+            # ㄴ 줄에 "두껍게" 없으면 표시 텍스트에 보충
+            display_ann = ann_part
+            if mid_fmt.get('bold') and '두껍게' not in ann_part:
+                inner = ann_part.lstrip('ㄴ').strip()
+                display_ann = 'ㄴ 두껍게 ' + inner
             ap = doc.add_paragraph()
-            run = ap.add_run(ann_part)
+            run = ap.add_run(display_ann)
             run.bold = True
             run.font.color.rgb = GREEN
             run.font.size = Pt(24)
             run.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
-            recent.append((ap, ann_part))
+            recent.append((ap, display_ann))
             continue
 
         # ㄴ 서식 지시 줄
@@ -393,13 +431,13 @@ def save_as_docx(text, filepath):
             if fmt.get('colored_words'):
                 if targets:
                     all_target_text = ' '.join(t for _, t in targets)
-                    missing = any(w not in all_target_text for w, _ in fmt['colored_words'])
+                    missing = any(not _word_in_text(w, all_target_text) for w, _ in fmt['colored_words'])
                     if missing and len(content_paras) > target_count:
                         found = False
                         for ext in range(target_count + 1, min(target_count + 5, len(content_paras) + 1)):
                             targets = content_paras[-ext:]
                             all_target_text = ' '.join(t for _, t in targets)
-                            if all(w in all_target_text for w, _ in fmt['colored_words']):
+                            if all(_word_in_text(w, all_target_text) for w, _ in fmt['colored_words']):
                                 found = True
                                 break
                         if found:
@@ -415,6 +453,11 @@ def save_as_docx(text, filepath):
             else:
                 applied = True
 
+            # 본문에 마크다운 볼드가 있으면 fmt에 bold 보충
+            if not fmt.get('bold') and targets:
+                if any(_has_markdown_bold(t) for _, t in targets):
+                    fmt['bold'] = True
+
             if applied:
                 per_para_cw = _split_colored_words_across_targets(targets, fmt.get('colored_words', []))
                 for idx, (para, para_text) in enumerate(targets):
@@ -425,13 +468,19 @@ def save_as_docx(text, filepath):
                     else:
                         _apply_formatting_to_para(para, para_text, fmt)
 
+            # ㄴ 줄에 "두껍게" 없으면 표시 텍스트에 보충
+            display_stripped = stripped
+            if fmt.get('bold') and '두껍게' not in stripped:
+                inner = stripped.lstrip('ㄴ').strip()
+                display_stripped = 'ㄴ 두껍게 ' + inner
+
             p = doc.add_paragraph()
-            run = p.add_run(stripped)
+            run = p.add_run(display_stripped)
             run.bold = True
             run.font.color.rgb = GREEN
             run.font.size = Pt(24)
             run.font.highlight_color = WD_COLOR_INDEX.BRIGHT_GREEN
-            recent.append((p, stripped))
+            recent.append((p, display_stripped))
             continue
 
         # 이미지 번호
@@ -472,7 +521,7 @@ def save_as_docx(text, filepath):
                 collected.append((p, stripped))
                 if pfmt.get('colored_words'):
                     all_text = ' '.join(t for _, t in collected)
-                    if all(w in all_text for w, _ in pfmt['colored_words']):
+                    if all(_word_in_text(w, all_text) for w, _ in pfmt['colored_words']):
                         per_para_cw = _split_colored_words_across_targets(collected, pfmt.get('colored_words', []))
                         for cidx, (cp, ct) in enumerate(collected):
                             if per_para_cw and cidx in per_para_cw:
