@@ -49,6 +49,7 @@ CONV_SHEET_ID  = "1xJAogt0alaQ8A5OctxltPaF3kg_0PFSF5Z0ePxMw3tY"
 CONV_TAB_NAME  = "전환 키워드"
 SHEET_KEYWORD  = "키워드 전광판"
 SHEET_PUBLIST  = "자사 발행리스트"
+SHEET_PUBLIST2 = "내부 발행리스트"
 CRED_FILE      = "../manuscript_generator/credentials.json"
 BLOG_TOP_N     = 5   # 블로그탭 상위 N위까지 체크
 WORKERS        = 2   # 병렬 브라우저 수
@@ -295,17 +296,30 @@ def search_blog(driver, keyword):
 # ────────────────────────────────────────────────
 
 def load_pub_links(spreadsheet):
-    """자사 발행리스트에서 {제품명: [(링크, 발행처, 발행일, 결제금액), ...]} 딕셔너리 반환"""
-    ws = spreadsheet.worksheet(SHEET_PUBLIST)
-    rows = ws.get_all_values()
-
+    """자사+내부 발행리스트에서 {제품명: [(링크, 발행처, 발행일, 결제금액), ...]} 딕셔너리 반환"""
     product_links = {}
-    for row in rows[1:]:
+
+    # 자사 발행리스트: 결제금액 Z열(25)
+    ws1 = spreadsheet.worksheet(SHEET_PUBLIST)
+    for row in ws1.get_all_values()[1:]:
         pub_date = cell(row, 0).strip()    # A열: 발행일
         product = cell(row, 1).strip()     # B열: 제품명
         link = cell(row, 12).strip()       # M열: 링크
         publisher = cell(row, 13).strip()  # N열: 발행처
         pay_amount = cell(row, 25).strip() # Z열: 결제금액
+        if product and link:
+            product_links.setdefault(product, []).append(
+                (link, publisher, pub_date, pay_amount)
+            )
+
+    # 내부 발행리스트: 결제금액 AA열(26)
+    ws2 = spreadsheet.worksheet(SHEET_PUBLIST2)
+    for row in ws2.get_all_values()[1:]:
+        pub_date = cell(row, 0).strip()    # A열: 발행일
+        product = cell(row, 1).strip()     # B열: 제품명
+        link = cell(row, 12).strip()       # M열: 링크
+        publisher = cell(row, 13).strip()  # N열: 발행처
+        pay_amount = cell(row, 26).strip() # AA열: 결제금액
         if product and link:
             product_links.setdefault(product, []).append(
                 (link, publisher, pub_date, pay_amount)
@@ -364,8 +378,8 @@ def main():
     kw_rows_pre = ws_keyword.get_all_values()
     fill_conversion_amounts(gc, ws_keyword, kw_rows_pre)
 
-    # 2. 자사 발행리스트 로드
-    print("[2] 자사 발행리스트 로드 중...")
+    # 2. 발행리스트 로드 (자사 + 내부)
+    print("[2] 발행리스트 로드 중 (자사 + 내부)...")
     pub_links = load_pub_links(spreadsheet)
     total_products = len(pub_links)
     total_links = sum(len(v) for v in pub_links.values())
@@ -470,6 +484,9 @@ def main():
                                         pd = datetime.strptime(pub_date, fmt)
                                         if pd.year == 1900:
                                             pd = pd.replace(year=datetime.now().year)
+                                        # 미래 날짜면 전년도로 보정 (2025년 발행분)
+                                        if pd > datetime.now():
+                                            pd = pd.replace(year=pd.year - 1)
                                         days_elapsed = str((datetime.now() - pd).days)
                                         break
                                     except ValueError:
