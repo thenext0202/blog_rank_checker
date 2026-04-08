@@ -160,37 +160,54 @@ def _select_template_by_name(driver, name: str) -> bool:
         a.se-doc-template[role='button']  ← 클릭 대상
           strong.se-doc-template-title     ← 이름 매칭
     """
-    try:
-        clicked = driver.execute_script("""
-            var name = arguments[0];
-            // 1) strong.se-doc-template-title 에서 이름 매칭
-            var titles = document.querySelectorAll('strong.se-doc-template-title');
-            for (var t of titles) {
-                if (t.textContent.trim() === name) {
-                    // 부모 a.se-doc-template 클릭
-                    var link = t.closest('a.se-doc-template');
-                    if (link) { link.click(); return true; }
-                    // fallback: 부모 li 클릭
-                    var li = t.closest('li.se-doc-template-item');
-                    if (li) { li.click(); return true; }
-                    t.click(); return true;
+    # 스크롤하면서 템플릿을 찾는다 (500개+ 대응)
+    for attempt in range(20):  # 최대 20회 스크롤
+        try:
+            result = driver.execute_script("""
+                var name = arguments[0];
+                // 1) 정확한 이름 매칭
+                var titles = document.querySelectorAll('strong.se-doc-template-title');
+                for (var t of titles) {
+                    if (t.textContent.trim() === name) {
+                        var link = t.closest('a.se-doc-template');
+                        if (link) { link.scrollIntoView({block:'center'}); link.click(); return 'found'; }
+                        var li = t.closest('li.se-doc-template-item');
+                        if (li) { li.scrollIntoView({block:'center'}); li.click(); return 'found'; }
+                        t.click(); return 'found';
+                    }
                 }
-            }
-            // 2) 부분 매칭 (포함 관계)
-            for (var t of titles) {
-                if (t.textContent.trim().includes(name) || name.includes(t.textContent.trim())) {
-                    var link = t.closest('a.se-doc-template');
-                    if (link) { link.click(); return true; }
-                    t.click(); return true;
+                // 2) 부분 매칭
+                for (var t of titles) {
+                    if (t.textContent.trim().includes(name) || name.includes(t.textContent.trim())) {
+                        var link = t.closest('a.se-doc-template');
+                        if (link) { link.scrollIntoView({block:'center'}); link.click(); return 'found'; }
+                        t.click(); return 'found';
+                    }
                 }
-            }
-            return false;
-        """, name)
-        if clicked:
-            print(f"  템플릿 항목 선택: {name}")
-            return True
-    except Exception:
-        pass
+                // 3) 못 찾으면 목록 스크롤
+                var container = document.querySelector(
+                    '.se-panel-scroll-area, .se-panel-content, '
+                    + '[class*="template"] [class*="scroll"], '
+                    + '[class*="panel-body"]'
+                );
+                if (container) {
+                    var before = container.scrollTop;
+                    container.scrollTop += 500;
+                    if (container.scrollTop === before) return 'end';
+                    return 'scrolled';
+                }
+                return 'no_container';
+            """, name)
+
+            if result == "found":
+                print(f"  템플릿 항목 선택: {name}")
+                return True
+            elif result == "end" or result == "no_container":
+                break  # 더 이상 스크롤 불가
+            # scrolled → 다음 루프에서 다시 탐색
+            time.sleep(0.3)
+        except Exception:
+            break
 
     return False
 
@@ -681,99 +698,127 @@ def run_publish(config: dict):
     skip_title = config.get("skip_title_input", False)
     publish_delay = config.get("publish_delay_sec", 3)
 
+    # 같은 blog_id끼리 묶어서 정렬 (순서 유지하면서 그룹핑)
+    from collections import OrderedDict
+    groups = OrderedDict()
+    for p in pending:
+        bid = p["blog_id"]
+        if bid not in groups:
+            groups[bid] = []
+        groups[bid].append(p)
+
+    total = len(pending)
     print(f"\n{'='*50}")
-    print(f"  {len(pending)}개 글 발행 예정")
+    print(f"  {total}개 글 발행 예정 ({len(groups)}개 계정)")
     if skip_title:
         print(f"  (제목 입력: 스킵 — 템플릿 제목 사용)")
     print(f"{'='*50}")
-    for p in pending:
-        print(f"  행 {p['row_num']}: [{p['blog_id']}] {p['title'][:40]}")
+    for bid, rows in groups.items():
+        print(f"  [{bid}] {len(rows)}건")
+        for p in rows:
+            print(f"    행 {p['row_num']}: {p['title'][:40]}")
     print()
 
-    # 첫 행의 blog_id로 포스터 생성 (행마다 변경됨)
-    poster = NaverBlogPoster(blog_id=pending[0]["blog_id"])
+    poster = NaverBlogPoster(blog_id=list(groups.keys())[0])
     poster.driver = poster.create_driver(headless=False)
 
     try:
-        # 로그인 확인
-        poster.driver.get("https://www.naver.com")
-        time.sleep(1)
-        if not poster._is_logged_in():
-            poster.driver.get("https://nid.naver.com/nidlogin.login")
-            print("  로그인이 필요합니다. 브라우저에서 로그인해주세요.")
-            input("  로그인 완료 후 Enter 키를 누르세요... ")
-            poster.driver.get("https://www.naver.com")
-            time.sleep(1)
-            if not poster._is_logged_in():
-                print("[오류] 로그인 실패. 다시 시도해주세요.")
-                return
-
-        print("  로그인 확인 완료\n")
-
-        # 발행 루프
         success_count = 0
         fail_count = 0
+        current_blog_id = None
+        global_idx = 0
 
-        for idx, row in enumerate(pending, 1):
-            row_num = row["row_num"]
-            blog_id = row["blog_id"]
-            title = row["title"]
-            template_name = row["template_name"]
-            category = row.get("category", "")
-            is_public = row.get("is_public", False)
+        for bid, rows in groups.items():
+            # 계정 전환 필요 시 로그아웃 → 재로그인
+            if current_blog_id is not None and bid != current_blog_id:
+                print(f"\n{'='*50}")
+                print(f"  계정 전환: {current_blog_id} → {bid}")
+                print(f"{'='*50}")
+                # 로그아웃
+                poster.driver.get("https://nid.naver.com/nidlogin.logout")
+                time.sleep(1)
+                # 재로그인 요청
+                poster.driver.get("https://nid.naver.com/nidlogin.login")
+                print(f"  [{bid}] 계정으로 로그인해주세요.")
+                input("  로그인 완료 후 Enter 키를 누르세요... ")
+                poster.driver.get("https://www.naver.com")
+                time.sleep(1)
+                if not poster._is_logged_in():
+                    print(f"  [오류] 로그인 실패. [{bid}] 건너뜁니다.")
+                    fail_count += len(rows)
+                    continue
+                print("  로그인 확인 완료\n")
+            else:
+                # 첫 계정 로그인
+                poster.driver.get("https://www.naver.com")
+                time.sleep(1)
+                if not poster._is_logged_in():
+                    poster.driver.get("https://nid.naver.com/nidlogin.login")
+                    print(f"  [{bid}] 계정으로 로그인해주세요.")
+                    input("  로그인 완료 후 Enter 키를 누르세요... ")
+                    poster.driver.get("https://www.naver.com")
+                    time.sleep(1)
+                    if not poster._is_logged_in():
+                        print(f"  [오류] 로그인 실패. [{bid}] 건너뜁니다.")
+                        fail_count += len(rows)
+                        continue
+                print("  로그인 확인 완료\n")
 
-            # 행마다 blog_id 갱신
-            poster.blog_id = blog_id
+            current_blog_id = bid
+            poster.blog_id = bid
 
-            print(f"[{idx}/{len(pending)}] 행 {row_num}: [{blog_id}] {title[:40]}")
-            if template_name != title:
-                print(f"  템플릿: {template_name}")
-            if category:
-                print(f"  카테고리: {category}")
-            print(f"  공개: {'전체공개' if is_public else '비공개'}")
+            for row in rows:
+                global_idx += 1
+                row_num = row["row_num"]
+                title = row["title"]
+                template_name = row["template_name"]
+                category = row.get("category", "")
+                is_public = row.get("is_public", False)
 
-            try:
-                # 에디터 이동
-                poster.navigate_to_editor()
+                print(f"[{global_idx}/{total}] 행 {row_num}: [{bid}] {title[:40]}")
+                if template_name != title:
+                    print(f"  템플릿: {template_name}")
+                if category:
+                    print(f"  카테고리: {category}")
+                print(f"  공개: {'전체공개' if is_public else '비공개'}")
 
-                # 템플릿 적용 (C열 키워드 = 템플릿명)
-                template_applied = apply_template(poster.driver, template_name)
-
-                # 제목 입력 (D열 실제 제목으로 교체)
-                if not skip_title:
-                    poster.input_title(title)
-                elif not template_applied:
-                    poster.input_title(title)
-
-                # 발행 (설정 → 카테고리 → 최종발행) + URL 추출
-                url = publish_and_get_url(poster, category=category, is_public=is_public)
-
-                if url:
-                    sheets_handler.write_url(ws, row_num, config["publish_url_col"], url)
-                    success_count += 1
-                    print(f"  → 완료!\n")
-                else:
-                    sheets_handler.write_url(
-                        ws, row_num, config["publish_url_col"], "발행완료(URL미확인)"
-                    )
-                    success_count += 1
-                    print(f"  → 발행됨 (URL 미확인)\n")
-
-            except Exception as e:
-                fail_count += 1
-                print(f"  [!] 오류: {e}")
                 try:
-                    poster.driver.save_screenshot(
-                        os.path.join(BASE_DIR, f"error_row{row_num}.png")
-                    )
-                    print(f"  스크린샷: error_row{row_num}.png")
-                except Exception:
-                    pass
-                print()
+                    poster.navigate_to_editor()
 
-            # 행 간 대기
-            if idx < len(pending):
-                time.sleep(publish_delay)
+                    template_applied = apply_template(poster.driver, template_name)
+
+                    if not skip_title:
+                        poster.input_title(title)
+                    elif not template_applied:
+                        poster.input_title(title)
+
+                    url = publish_and_get_url(poster, category=category, is_public=is_public)
+
+                    if url:
+                        sheets_handler.write_url(ws, row_num, config["publish_url_col"], url)
+                        success_count += 1
+                        print(f"  → 완료!\n")
+                    else:
+                        sheets_handler.write_url(
+                            ws, row_num, config["publish_url_col"], "발행완료(URL미확인)"
+                        )
+                        success_count += 1
+                        print(f"  → 발행됨 (URL 미확인)\n")
+
+                except Exception as e:
+                    fail_count += 1
+                    print(f"  [!] 오류: {e}")
+                    try:
+                        poster.driver.save_screenshot(
+                            os.path.join(BASE_DIR, f"error_row{row_num}.png")
+                        )
+                        print(f"  스크린샷: error_row{row_num}.png")
+                    except Exception:
+                        pass
+                    print()
+
+                if global_idx < total:
+                    time.sleep(publish_delay)
 
         # 완료 요약
         print(f"{'='*50}")
