@@ -214,7 +214,36 @@ def sync_tab(ws_source, ws_checker):
     if not new_rows and not updates:
         print("    동기화: 변경 없음")
 
+    # 발행일(M열) 기준 내림차순 정렬 (최신이 위로)
+    sort_by_pub_date(ws_checker)
+
     return src_rows
+
+
+def sort_by_pub_date(ws_checker):
+    """순위 체커 탭을 발행일(M열) 기준 내림차순 정렬 (서식 유지)"""
+    chk_rows = ws_checker.get_all_values()
+    if len(chk_rows) <= 2:
+        return
+
+    sheet_id = ws_checker.id
+    ws_checker.spreadsheet.batch_update({
+        "requests": [{
+            "sortRange": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,  # 헤더 제외
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 13,
+                },
+                "sortSpecs": [{
+                    "dimensionIndex": CHK_COL_M,  # M열(발행일)
+                    "sortOrder": "DESCENDING",
+                }],
+            }
+        }]
+    })
+    print("    정렬: 발행일 최신순")
 
 
 # ────────────────────────────────────────────────
