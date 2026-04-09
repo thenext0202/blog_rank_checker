@@ -181,6 +181,9 @@ def sync_tab(ws_source, ws_checker):
     if new_rows:
         start_row = len(chk_rows) + 1
         end_row = start_row + len(new_rows) - 1
+        # 행 수 부족하면 확장
+        if end_row > ws_checker.row_count:
+            ws_checker.add_rows(end_row - ws_checker.row_count + 100)
         ws_checker.update(
             values=new_rows,
             range_name=f"A{start_row}:M{end_row}",
