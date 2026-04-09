@@ -16,10 +16,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-ARG CACHE_BUST=2
-COPY . .
+ARG CACHE_BUST=3
+COPY rank_checker.py .
 
 ENV CHROME_BIN=/usr/bin/google-chrome
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "rank.py"]
+CMD ["python", "rank_checker.py", "cron"]
