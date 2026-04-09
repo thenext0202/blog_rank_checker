@@ -43,6 +43,7 @@ CRED_FILE      = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 BLOG_TAB_LIMIT = 10  # 블로그탭 순위 체크 상한
 
 # 자사 발행리스트 열 인덱스 (0-based)
+SRC_COL_A = 0   # 발행일 (월/일)
 SRC_COL_E = 4   # 키워드
 SRC_COL_H = 7   # 파라미터값 (조인키)
 SRC_COL_J = 9   # 순위 결과
@@ -62,6 +63,7 @@ CHK_COL_I = 8   # 메인3
 CHK_COL_J = 9   # 블탭3
 CHK_COL_K = 10  # 최초체크일
 CHK_COL_L = 11  # 상태
+CHK_COL_M = 12  # 발행일 (자사 발행리스트 A열)
 
 # 노란색 배경 (순위 변동 표시)
 LIGHT_YELLOW = {"backgroundColor": {"red": 1, "green": 1, "blue": 0.8}}
@@ -99,12 +101,12 @@ def ensure_checker_tab(spreadsheet):
     if TAB_CHECKER in existing:
         return spreadsheet.worksheet(TAB_CHECKER)
 
-    ws = spreadsheet.add_worksheet(title=TAB_CHECKER, rows=1000, cols=12)
+    ws = spreadsheet.add_worksheet(title=TAB_CHECKER, rows=1000, cols=13)
     ws.update(
         values=[["파라미터값", "키워드", "링크", "실행",
                  "메인1", "블탭1", "메인2", "블탭2", "메인3", "블탭3",
-                 "최초체크일", "상태"]],
-        range_name="A1:L1",
+                 "최초체크일", "상태", "발행일"]],
+        range_name="A1:M1",
     )
     # D열 체크박스
     set_checkbox(spreadsheet, ws, "D2:D1000")
@@ -158,8 +160,9 @@ def sync_tab(ws_source, ws_checker):
         param = _cell(row, SRC_COL_H)
         keyword = _cell(row, SRC_COL_E)
         link = _cell(row, SRC_COL_M)
+        pub_date = _cell(row, SRC_COL_A)  # 발행일 (월/일)
         if param:
-            src_data[param] = (keyword, link)
+            src_data[param] = (keyword, link, pub_date)
 
     # 체커 탭 기존 파라미터 목록
     chk_params = set()
@@ -168,34 +171,40 @@ def sync_tab(ws_source, ws_checker):
         if p:
             chk_params.add(p)
 
-    # 신규 행 추가 (12열: A~L)
+    # 신규 행 추가 (13열: A~M)
     new_rows = []
-    for param, (kw, link) in src_data.items():
+    for param, (kw, link, pub_date) in src_data.items():
         if param not in chk_params:
             new_rows.append([param, kw, link, False,
-                             "", "", "", "", "", "", "", ""])
+                             "", "", "", "", "", "", "", "", pub_date])
 
     if new_rows:
         start_row = len(chk_rows) + 1
         end_row = start_row + len(new_rows) - 1
         ws_checker.update(
             values=new_rows,
-            range_name=f"A{start_row}:L{end_row}",
+            range_name=f"A{start_row}:M{end_row}",
         )
         print(f"    동기화: {len(new_rows)}개 신규 행 추가")
 
-    # 기존 행의 키워드/링크 업데이트
+    # 기존 행의 키워드/링크/발행일 업데이트
     updates = []
     for idx, row in enumerate(chk_rows[1:], start=2):
         param = _cell(row, CHK_COL_A)
         if param in src_data:
-            src_kw, src_link = src_data[param]
+            src_kw, src_link, src_pub = src_data[param]
             cur_kw = _cell(row, CHK_COL_B)
             cur_link = _cell(row, CHK_COL_C)
+            cur_pub = _cell(row, CHK_COL_M)
             if cur_kw != src_kw or cur_link != src_link:
                 updates.append({
                     "range": f"B{idx}:C{idx}",
                     "values": [[src_kw, src_link]],
+                })
+            if cur_pub != src_pub:
+                updates.append({
+                    "range": f"M{idx}",
+                    "values": [[src_pub]],
                 })
 
     if updates:
@@ -310,16 +319,41 @@ def get_business_days_ago(n, today=None):
     return d
 
 
-def is_within_business_days(date_str, n=3, today=None):
-    """주어진 날짜가 오늘 기준 n영업일 이내인지"""
+def parse_date(date_str):
+    """다양한 날짜 형식 파싱 → date 객체. 실패 시 None"""
     if not date_str:
-        return False
+        return None
+    # "2026-04-09" 형식
     try:
-        check_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
     except ValueError:
+        pass
+    # "4/7" 형식 (월/일) → 올해 기준, 미래면 전년도
+    try:
+        parts = date_str.split("/")
+        if len(parts) == 2:
+            month, day = int(parts[0]), int(parts[1])
+            today = datetime.now().date()
+            d = datetime(today.year, month, day).date()
+            if d > today:
+                d = datetime(today.year - 1, month, day).date()
+            return d
+    except (ValueError, IndexError):
+        pass
+    return None
+
+
+def is_within_check_range(date_str, today=None):
+    """발행일이 체크 대상 범위인지 (어제부터 영업일 3일 거슬러)"""
+    check_date = parse_date(date_str)
+    if check_date is None:
         return False
-    cutoff = get_business_days_ago(n, today)
-    return check_date >= cutoff
+    if today is None:
+        today = datetime.now().date()
+    # 어제부터 영업일 3일 전까지
+    end = today - timedelta(days=1)  # 어제
+    start = get_business_days_ago(3, today)
+    return start <= check_date <= end
 
 
 # ────────────────────────────────────────────────
@@ -669,7 +703,7 @@ def has_any_checked(chk_rows):
 
 
 def get_cron_targets(chk_rows):
-    """크론 모드: 3영업일 이내 + 빈 슬롯 있는 행만"""
+    """3영업일 이내(발행일 기준) + 빈 슬롯 있는 행만"""
     targets = []
     today = datetime.now().date()
 
@@ -677,6 +711,7 @@ def get_cron_targets(chk_rows):
         param = _cell(row, CHK_COL_A)
         kw = _cell(row, CHK_COL_B)
         link = _cell(row, CHK_COL_C)
+        pub_date = _cell(row, CHK_COL_M)  # 발행일 (자사 발행리스트 A열)
         if not param or not kw or not link:
             continue
 
@@ -684,16 +719,17 @@ def get_cron_targets(chk_rows):
         if slot is None:
             continue  # 3슬롯 다 참
 
-        first_date = _cell(row, CHK_COL_K)
-
-        # slot1 (아직 체크 안 된 행) → 무조건 대상
-        if slot == "slot1":
-            targets.append((idx, param, kw, link, slot, prev_main, prev_blog, row))
+        # 발행일이 3영업일 이내가 아니면 스킵
+        if not is_within_check_range(pub_date, today=today):
             continue
 
-        # slot2, slot3 → 최초체크일이 3영업일 이내면 대상
-        if is_within_business_days(first_date, n=3, today=today):
-            targets.append((idx, param, kw, link, slot, prev_main, prev_blog, row))
+        # slot2, slot3은 추가로 최초체크일도 확인
+        if slot in ("slot2", "slot3"):
+            first_date = _cell(row, CHK_COL_K)
+            if not is_within_check_range(first_date, today=today):
+                continue
+
+        targets.append((idx, param, kw, link, slot, prev_main, prev_blog, row))
 
     return targets
 
