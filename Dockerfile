@@ -22,4 +22,4 @@ COPY rank_checker.py .
 ENV CHROME_BIN=/usr/bin/google-chrome
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "rank_checker.py", "cron"]
+CMD ["python", "rank_checker.py"]
