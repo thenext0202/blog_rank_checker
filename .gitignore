@@ -2,6 +2,7 @@ __pycache__/
 *.png
 *.html
 *.json
+!railway.json
 .env
 *.pyc
 
@@ -16,3 +17,5 @@ debug_*.py
 diagnose*.py
 test_*.py
 check_*.py
+
+credentials.json
