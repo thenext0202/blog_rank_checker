@@ -622,19 +622,13 @@ def write_result(ws_source, ws_checker, spreadsheet,
             print(f"           블탭 변동! ({prev_blog_str} → {blog_str}) 노란색")
 
     # ── 자사 발행리스트: J열(순위) + T열(블탭) ──
-    # 메인 우선 → 없으면 블로그탭
+    # 메인 우선 → 없으면 블로그탭 → 둘 다 없으면 기입 안 함
     if main_rank is not None:
-        j_str = main_str
-        t_str = ""
+        ws_source.update(values=[[main_str]], range_name=f"J{src_row_num}")
+        ws_source.update(values=[[""]], range_name=f"T{src_row_num}")
     elif blog_rank is not None:
-        j_str = blog_str
-        t_str = "블탭"
-    else:
-        j_str = "순위 밖"
-        t_str = ""
-
-    ws_source.update(values=[[j_str]], range_name=f"J{src_row_num}")
-    ws_source.update(values=[[t_str]], range_name=f"T{src_row_num}")
+        ws_source.update(values=[[blog_str]], range_name=f"J{src_row_num}")
+        ws_source.update(values=[["블탭"]], range_name=f"T{src_row_num}")
 
     # 자사 발행리스트 J열 변동 시 노란색
     if slot in ("slot2", "slot3") and prev_main_str:
