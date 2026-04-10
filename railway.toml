@@ -4,3 +4,5 @@ dockerfilePath = "./Dockerfile"
 
 [deploy]
 startCommand = "python startup.py"
+# 매일 KST 10시 (UTC 1시)에 컨테이너 시작 → watch 모드 → 14시까지 4시간 운영 후 자동 종료
+cronSchedule = "0 1 * * *"

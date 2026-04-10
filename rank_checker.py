@@ -876,9 +876,17 @@ def watch(interval=60):
     print("=" * 50)
 
     driver = None
+    # 운영 시간: 10시 ~ 14시 (KST)
+    OP_START_HOUR = 10
+    OP_END_HOUR = 14
 
     try:
         while True:
+            # 운영 시간 종료 → watch 모드 종료
+            if datetime.now().hour >= OP_END_HOUR:
+                print(f"\n\n  운영 시간 종료 ({OP_END_HOUR}시) — watch 모드 종료")
+                break
+
             try:
                 spreadsheet, ws_source, ws_checker = connect_sheets()
                 src_rows = sync_tab(ws_source, ws_checker)
