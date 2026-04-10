@@ -866,8 +866,8 @@ def run_once(mode="manual"):
     print("=" * 50)
 
 
-def watch(interval=300):
-    """시트를 주기적으로 감시하며 체크박스 체크 시 자동 실행 (기본 5분)"""
+def watch(interval=60):
+    """시트를 주기적으로 감시하며 체크박스 체크 시 자동 실행 (기본 60초)"""
     print("=" * 50)
     print("  네이버 순위 체커 (통합) - 감시 모드")
     print(f"  {interval}초마다 시트를 확인합니다.")
