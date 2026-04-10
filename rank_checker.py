@@ -561,6 +561,7 @@ def check_blog(driver, keyword, target_url):
 
 def determine_slot(row):
     """행 데이터를 보고 기록할 슬롯 결정. 모두 차있으면 None.
+    오늘 이미 체크한 슬롯이 있으면 같은 슬롯 덮어쓰기.
     반환: (슬롯명, 이전 메인 순위, 이전 블탭 순위) 또는 (None, None, None)
     """
     e = _cell(row, CHK_COL_E)  # 메인1
@@ -569,6 +570,18 @@ def determine_slot(row):
     h = _cell(row, CHK_COL_H)  # 블탭2
     i = _cell(row, CHK_COL_I)  # 메인3
     j = _cell(row, CHK_COL_J)  # 블탭3
+
+    # 오늘 이미 체크했으면 같은 슬롯 덮어쓰기
+    status = _cell(row, CHK_COL_L)  # "완료 04/10 11:02" 형식
+    today_str = datetime.now().strftime("%m/%d")
+    if status.startswith("완료") and today_str in status:
+        # 마지막으로 기록된 슬롯 찾기 (가장 뒤에 값이 있는 슬롯)
+        if i or j:
+            return "slot3", g, h
+        elif g or h:
+            return "slot2", e, f
+        elif e or f:
+            return "slot1", None, None
 
     if not e and not f:
         return "slot1", None, None
@@ -609,17 +622,26 @@ def write_result(ws_source, ws_checker, spreadsheet,
         today_str = datetime.now().strftime("%Y-%m-%d")
         ws_checker.update(values=[[today_str]], range_name=f"K{chk_row_num}")
 
-    # ── 순위 변동 비교 (slot2, slot3) → 노란색 ──
+    # ── 순위 상승 비교 (slot2, slot3) → 노란색 ──
     if slot in ("slot2", "slot3") and prev_main_str:
         prev_main = parse_rank(prev_main_str)
         prev_blog = parse_rank(prev_blog_str)
 
-        if main_rank != prev_main:
+        # 순위 상승 = 숫자가 줄어들거나, 순위 밖 → 순위 진입
+        main_up = (main_rank is not None and
+                   (prev_main is None or main_rank < prev_main))
+        blog_up = (blog_rank is not None and
+                   (prev_blog is None or blog_rank < prev_blog))
+
+        # 기존 노란색 초기화
+        ws_checker.format(f"{main_col}{chk_row_num}:{blog_col}{chk_row_num}", WHITE)
+
+        if main_up:
             ws_checker.format(f"{main_col}{chk_row_num}", LIGHT_YELLOW)
-            print(f"           메인 변동! ({prev_main_str} → {main_str}) 노란색")
-        if blog_rank != prev_blog:
+            print(f"           메인 순위 상승! ({prev_main_str} → {main_str}) 노란색")
+        if blog_up:
             ws_checker.format(f"{blog_col}{chk_row_num}", LIGHT_YELLOW)
-            print(f"           블탭 변동! ({prev_blog_str} → {blog_str}) 노란색")
+            print(f"           블탭 순위 상승! ({prev_blog_str} → {blog_str}) 노란색")
 
     # ── 자사 발행리스트: J열(순위) + T열(블탭) ──
     # 메인 우선 → 없으면 블로그탭 → 둘 다 없으면 기입 안 함
@@ -630,13 +652,14 @@ def write_result(ws_source, ws_checker, spreadsheet,
         ws_source.update(values=[[blog_str]], range_name=f"J{src_row_num}")
         ws_source.update(values=[["블탭"]], range_name=f"T{src_row_num}")
 
-    # 자사 발행리스트 J열 변동 시 노란색
+    # 자사 발행리스트 J열 순위 상승 시 노란색
     if slot in ("slot2", "slot3") and prev_main_str:
-        # 이전 J열 기준값 (메인 우선)
         prev_j = parse_rank(prev_main_str) if parse_rank(prev_main_str) else parse_rank(prev_blog_str)
         curr_j = main_rank if main_rank is not None else blog_rank
-        if curr_j != prev_j:
-            ws_source.format(f"J{src_row_num}", LIGHT_YELLOW)
+        # 순위 상승일 때만 노란색
+        j_up = (curr_j is not None and
+                (prev_j is None or curr_j < prev_j))
+        ws_source.format(f"J{src_row_num}", LIGHT_YELLOW if j_up else WHITE)
 
     return main_str, blog_str
 
@@ -728,6 +751,25 @@ def has_any_checked(chk_rows):
     return len(clear_rows) > 0, clear_rows
 
 
+def get_checked_targets(chk_rows, clear_rows):
+    """수동 체크된 행 중 빈 슬롯 있는 행만 (3영업일 필터 없음)"""
+    checked_set = set(clear_rows)
+    targets = []
+    for idx, row in enumerate(chk_rows[1:], start=2):
+        if idx not in checked_set:
+            continue
+        param = _cell(row, CHK_COL_A)
+        kw = _cell(row, CHK_COL_B)
+        link = _cell(row, CHK_COL_C)
+        if not param or not kw or not link:
+            continue
+        slot, prev_main, prev_blog = determine_slot(row)
+        if slot is None:
+            continue
+        targets.append((idx, param, kw, link, slot, prev_main, prev_blog, row))
+    return targets
+
+
 def get_cron_targets(chk_rows):
     """3영업일 이내(발행일 기준) + 빈 슬롯 있는 행만"""
     targets = []
@@ -792,8 +834,8 @@ def run_once(mode="manual"):
         # 체크 해제
         updates = [{"range": f"D{r}", "values": [[False]]} for r in clear_rows]
         ws_checker.batch_update(updates)
-        # 3영업일 룰로 대상 수집
-        targets = get_cron_targets(chk_rows)
+        # 체크된 행만 대상 (3영업일 필터 없음)
+        targets = get_checked_targets(chk_rows, clear_rows)
 
     if not targets:
         print("    처리 대상이 없습니다.")
@@ -859,8 +901,8 @@ def watch(interval=60):
             updates = [{"range": f"D{r}", "values": [[False]]} for r in clear_rows]
             ws_checker.batch_update(updates)
 
-            # 3영업일 룰로 대상 수집
-            targets = get_cron_targets(chk_rows)
+            # 체크된 행만 대상 (3영업일 필터 없음)
+            targets = get_checked_targets(chk_rows, clear_rows)
             if not targets:
                 print(f"\n\n  >> 체크 감지했으나 처리할 대상 없음 (모두 3슬롯 완료)")
                 time.sleep(interval)
