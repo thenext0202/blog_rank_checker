@@ -4,7 +4,10 @@ Railway 시작 스크립트 v7
 GOOGLE_CREDENTIALS_BASE64 → credentials.json 파일로 변환 후 rank_checker.py watch 실행
 """
 import os, base64, json, sys
-print("=== STARTUP v7 (rank_checker.py watch) ===", flush=True)
+from datetime import datetime
+print("=== STARTUP v8 (rank_checker.py watch) ===", flush=True)
+print(f"[startup] 시작 시각: {datetime.now()}", flush=True)
+print(f"[startup] TZ: {os.environ.get('TZ', 'not set')}", flush=True)
 
 creds_b64 = os.environ.get('GOOGLE_CREDENTIALS_BASE64', '')
 
