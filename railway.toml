@@ -4,5 +4,4 @@ dockerfilePath = "./Dockerfile"
 
 [deploy]
 startCommand = "python startup.py"
-# 매일 KST 10시 (UTC 1시) 시작 → 14시까지 watch → 자동 종료
-cronSchedule = "0 1 * * *"
+# cronSchedule = "0 1 * * *"  # 테스트 후 주석 해제
