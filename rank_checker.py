@@ -149,6 +149,16 @@ def set_checkbox(spreadsheet, ws, range_str):
 #  탭 동기화: 자사 발행리스트 → 순위 체커
 # ────────────────────────────────────────────────
 
+def normalize_date(date_str):
+    """'4/10' → '2026-04-10' 형식으로 변환. 이미 YYYY-MM-DD면 그대로."""
+    if not date_str:
+        return date_str
+    d = parse_date(date_str)
+    if d:
+        return d.strftime("%Y-%m-%d")
+    return date_str  # 파싱 실패 시 원본
+
+
 def sync_tab(ws_source, ws_checker):
     """자사 발행리스트의 (파라미터, 키워드, 링크)를 순위 체커 탭에 동기화"""
     src_rows = ws_source.get_all_values()
@@ -160,7 +170,7 @@ def sync_tab(ws_source, ws_checker):
         param = _cell(row, SRC_COL_H)
         keyword = _cell(row, SRC_COL_E)
         link = _cell(row, SRC_COL_M)
-        pub_date = _cell(row, SRC_COL_A)  # 발행일 (월/일)
+        pub_date = normalize_date(_cell(row, SRC_COL_A))  # YYYY-MM-DD로 변환
         if param:
             src_data[param] = (keyword, link, pub_date)
 
@@ -190,7 +200,7 @@ def sync_tab(ws_source, ws_checker):
         )
         print(f"    동기화: {len(new_rows)}개 신규 행 추가")
 
-    # 기존 행의 키워드/링크/발행일 업데이트
+    # 기존 행의 키워드/링크/발행일 업데이트 + M열 날짜 형식 정규화
     updates = []
     for idx, row in enumerate(chk_rows[1:], start=2):
         param = _cell(row, CHK_COL_A)
@@ -204,6 +214,7 @@ def sync_tab(ws_source, ws_checker):
                     "range": f"B{idx}:C{idx}",
                     "values": [[src_kw, src_link]],
                 })
+            # 날짜 형식이 다르면 (4/10 → 2026-04-10) 업데이트
             if cur_pub != src_pub:
                 updates.append({
                     "range": f"M{idx}",
