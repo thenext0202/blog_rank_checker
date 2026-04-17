@@ -25,6 +25,7 @@ def parse_annotation(annotation_text):
         'link': False,
         'multi_line': 1,
         'is_image_desc': False,
+        'target_words': [],    # — "단어" / "단어" — 형태로 지정된 타겟 단어들
     }
 
     # 이미지 설명: ㄴ (혈압 측정하는 모습 사진)
@@ -132,7 +133,41 @@ def parse_annotation(annotation_text):
     if m:
         fmt['multi_line'] = num_map.get(m.group(1), 1)
 
+    # 타겟 단어 추출 — 대시(—/–/-) 주변의 큰따옴표 단어
+    # 예: 'ㄴ 하늘색 형광펜, 볼드 — "오메가3추천"' → target_words=['오메가3추천']
+    # 예: 'ㄴ "블러디션 배합" — 검정 형광펜, 볼드' → target_words=['블러디션 배합']
+    target_words_found = []
+    for m in re.finditer(r'[—–\-]\s*"([^"]+)"', text):
+        target_words_found.append(m.group(1))
+    for m in re.finditer(r'"([^"]+)"\s*[—–\-]', text):
+        target_words_found.append(m.group(1))
+    # 중복 제거(순서 유지)
+    seen = set()
+    for w in target_words_found:
+        if w not in seen:
+            fmt['target_words'].append(w)
+            seen.add(w)
+
     return fmt
+
+
+def _is_self_reference_annotation(text):
+    """ㄴ 주석 자신의 표시 스펙만 담긴 줄인지 판별.
+
+    예: 'ㄴ 초록 형광펜' / 'ㄴ 초록 형광펜, 24pt, 볼드'
+    — ㄴ 주석은 이미 초록 형광펜 24pt 볼드로 자동 표시되므로 이런 줄은 무시해야 함.
+    '초록 형광펜'이 들어있고, 나머지가 크기·pt·볼드·구분자뿐이면 True.
+    """
+    s = text.lstrip('ㄴ').strip()
+    if not re.search(r'초록\s*형광펜', s):
+        return False
+    cleaned = re.sub(r'초록\s*형광펜', '', s)
+    cleaned = re.sub(r'\d+\s*pt', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'글자\s*크기\s*\d+', '', cleaned)
+    # 볼드/두껍게/bold 키워드도 self-reference 판정 시 제거
+    cleaned = re.sub(r'글꼴\s*두껍게|두껍게|볼드|bold', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'[,\s]', '', cleaned)
+    return cleaned == ''
 
 
 def _annotation_display_text(ann):
@@ -312,14 +347,56 @@ def _apply_formatting_to_para(para, original_text, fmt):
 
     규칙: 원문에 `**..**` 볼드 마크다운이 하나라도 있으면 **색/형광펜/밑줄/볼드는 그 범위에만** 적용.
     없으면 단락 전체에 적용. 글자 크기와 인용구는 항상 단락 전체.
+    target_words가 있으면 해당 단어에만 색/형광펜/볼드/밑줄 적용 (문단 전체 X).
     """
     from docx.shared import Pt, RGBColor
     BLUE_C = RGBColor(0x00, 0x70, 0xC0)
-    _clear_paragraph_runs(para)
-
-    segments = _build_styled_segments(original_text, fmt.get('colored_words', []))
 
     is_quote = bool(fmt.get('quote'))
+    target_words = fmt.get('target_words') or []
+
+    # ── target_words 경로: 해당 단어에만 서식 적용 ──
+    if target_words and not is_quote:
+        # 이 para 안에 target_word가 하나도 없으면 건드리지 않음
+        if not any(w in original_text for w in target_words):
+            return
+        _clear_paragraph_runs(para)
+
+        char_is_target = [False] * len(original_text)
+        for w in target_words:
+            for m in re.finditer(re.escape(w), original_text):
+                for j in range(m.start(), m.end()):
+                    char_is_target[j] = True
+
+        _color_map = _get_color_name_to_rgb()
+        i = 0
+        while i < len(original_text):
+            cur = char_is_target[i]
+            j = i
+            while j < len(original_text) and char_is_target[j] == cur:
+                j += 1
+            seg_text = original_text[i:j]
+            run = para.add_run(seg_text)
+            if fmt.get('font_size'):
+                run.font.size = Pt(fmt['font_size'])
+            if cur:
+                if fmt.get('bold'):
+                    run.bold = True
+                if fmt.get('italic'):
+                    run.italic = True
+                if fmt.get('underline'):
+                    run.underline = True
+                if fmt.get('full_text_color_hex'):
+                    run.font.color.rgb = RGBColor.from_string(fmt['full_text_color_hex'])
+                elif fmt.get('full_text_color') and fmt['full_text_color'] in _color_map:
+                    run.font.color.rgb = _color_map[fmt['full_text_color']]
+                if fmt.get('highlight'):
+                    run.font.highlight_color = fmt['highlight']
+            i = j
+        return
+
+    _clear_paragraph_runs(para)
+    segments = _build_styled_segments(original_text, fmt.get('colored_words', []))
     has_md_bold_spans = bool(re.search(r'\*\*[^*]+\*\*', original_text))
 
     for seg_text, seg_props in segments:
@@ -454,11 +531,18 @@ def _build_document(text):
     while _i < len(lines):
         _cur = lines[_i]
         _s = _cur.strip()
+        # ㄴ 주석 자기-참조 줄(ㄴ 초록 형광펜 등)은 완전 제거
+        if _s.startswith('ㄴ') and _is_self_reference_annotation(_s):
+            _i += 1
+            continue
         if _s.startswith('ㄴ') and _is_format_annotation(_s):
             _combined = _s
             _j = _i + 1
             while _j < len(lines):
                 _nxt = lines[_j].strip()
+                if _nxt.startswith('ㄴ') and _is_self_reference_annotation(_nxt):
+                    _j += 1  # 병합 대상에서 제외, 라인 자체도 drop
+                    continue
                 if _nxt.startswith('ㄴ') and _is_format_annotation(_nxt):
                     _combined = _combined + ', ' + _nxt.lstrip('ㄴ').strip()
                     _j += 1
@@ -485,15 +569,21 @@ def _build_document(text):
             continue
 
         if in_blogger_req:
-            if not stripped:
+            # 구분선(─/—/-) 5개 이상에서 박스 종료 (박스 밖에 구분선 텍스트 출력 X)
+            if re.match(r'^[─—–\-]{5,}$', stripped):
                 _add_blogger_request_box(doc, blogger_req_lines)
                 blogger_req_lines = []
                 in_blogger_req = False
                 recent.append((doc.paragraphs[-1] if doc.paragraphs else None, ''))
                 continue
-            else:
-                blogger_req_lines.append(stripped)
+            # ㄴ 서식 지시 줄은 박스 전체 서식용 표시이므로 drop (박스 내 노출 X)
+            if stripped.startswith('ㄴ'):
                 continue
+            # 박스 내부의 빈 줄은 무시 (박스 닫지 않음)
+            if not stripped:
+                continue
+            blogger_req_lines.append(stripped)
+            continue
 
         # ── 빈 줄 ──
         if not stripped:
@@ -543,7 +633,7 @@ def _build_document(text):
             # 블록 안에 `**..**` 단락이 하나라도 있으면 **볼드가 있는 단락만** 타겟(볼드 없는 일반 문장은 스킵).
             # 없으면 블록 마지막 한 단락만 타겟.
             # 이 로직은 사용자가 '두 줄 모두' 등 multi_line을 명시하지 않고 colored_words도 없을 때만 동작.
-            if target_count == 1 and not fmt.get('colored_words'):
+            if target_count == 1 and not fmt.get('colored_words') and not fmt.get('target_words'):
                 block = []
                 for p_r, t_r in reversed(recent):
                     t_s = t_r.strip() if t_r else ''
@@ -560,23 +650,29 @@ def _build_document(text):
                     if bold_paras:
                         targets = bold_paras
                     else:
-                        targets = block[-1:]
+                        # 블록 안에 **..** 볼드 범위가 없으면 블록 전체에 적용
+                        targets = block
                 else:
                     targets = []
             else:
                 targets = content_paras[-target_count:] if content_paras else []
 
             applied = False
-            if fmt.get('colored_words'):
+            # colored_words / target_words 모두 "단어 기반" 타겟팅이라 fallback 로직 공유
+            search_words = (
+                [w for w, _ in fmt.get('colored_words', [])]
+                + list(fmt.get('target_words', []))
+            )
+            if search_words:
                 if targets:
                     all_target_text = ' '.join(t for _, t in targets)
-                    missing = any(w not in all_target_text for w, _ in fmt['colored_words'])
+                    missing = any(w not in all_target_text for w in search_words)
                     if missing and len(content_paras) > target_count:
                         found = False
-                        for ext in range(target_count + 1, min(target_count + 5, len(content_paras) + 1)):
+                        for ext in range(target_count + 1, min(target_count + 8, len(content_paras) + 1)):
                             targets = content_paras[-ext:]
                             all_target_text = ' '.join(t for _, t in targets)
-                            if all(w in all_target_text for w, _ in fmt['colored_words']):
+                            if all(w in all_target_text for w in search_words):
                                 found = True
                                 break
                         if found:
@@ -649,9 +745,13 @@ def _build_document(text):
             new_pending = []
             for pfmt, collected in pending_fmts:
                 collected.append((p, stripped))
-                if pfmt.get('colored_words'):
+                p_search_words = (
+                    [w for w, _ in pfmt.get('colored_words', [])]
+                    + list(pfmt.get('target_words', []))
+                )
+                if p_search_words:
                     all_text = ' '.join(t for _, t in collected)
-                    if all(w in all_text for w, _ in pfmt['colored_words']):
+                    if all(w in all_text for w in p_search_words):
                         per_para_cw = _split_colored_words_across_targets(collected, pfmt.get('colored_words', []))
                         for cidx, (cp, ct) in enumerate(collected):
                             if per_para_cw and cidx in per_para_cw:
@@ -660,7 +760,7 @@ def _build_document(text):
                                 _apply_formatting_to_para(cp, ct, p_fmt)
                             else:
                                 _apply_formatting_to_para(cp, ct, pfmt)
-                    elif len(collected) < 5:
+                    elif len(collected) < 8:
                         new_pending.append((pfmt, collected))
                 else:
                     _apply_formatting_to_para(p, stripped, pfmt)
