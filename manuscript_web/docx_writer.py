@@ -17,6 +17,31 @@ def _is_phase_e_text(body):
     return '★' in (body or '')
 
 
+def _sanitize_markup(text):
+    """LLM이 섞어 쓴 HTML/확장 마크다운 문법 정리.
+
+    docx_formatter가 인식하는 것만 남긴다 (**볼드** + ㄴ 주석 + 순수 텍스트).
+    포매터 입력 직전 1회 실행. 포매터 자체는 건드리지 않는다.
+    """
+    if not text:
+        return text
+
+    # <br> → 줄바꿈
+    text = re.sub(r"<\s*br\s*/?\s*>", "\n", text, flags=re.IGNORECASE)
+    # HTML/XML 태그 제거 (내용물 유지) — <span>, <u>, <b>, <div>, <p>, <strong>, <em> 등
+    text = re.sub(r"</?[a-zA-Z][^>]*>", "", text)
+    # ~~취소선~~ → 내용만
+    text = re.sub(r"~~([^~\n]+?)~~", r"\1", text)
+    # ___단어___ → **단어** (3개 먼저 처리해야 2개 패턴과 충돌 안 함)
+    text = re.sub(r"___([^_\n]+?)___", r"**\1**", text)
+    # __단어__ → **단어**
+    text = re.sub(r"__([^_\n]+?)__", r"**\1**", text)
+    # ==단어== → **단어**
+    text = re.sub(r"==([^=\n]+?)==", r"**\1**", text)
+
+    return text
+
+
 def build_docx_bytes(title, body):
     """제목 + 본문 → .docx bytes.
 
@@ -26,6 +51,7 @@ def build_docx_bytes(title, body):
     body = (body or "").strip()
 
     if _is_phase_e_text(body):
+        body = _sanitize_markup(body)
         return build_docx_bytes_from_text(body)
 
     # 폴백: Phase C만 있는 경우 — 단순 제목 + 단락
