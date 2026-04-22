@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>메디셜 블록 원고 생성기 v{{ version }}</title>
+<style>
+  :root {
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --success: #16a34a;
+    --danger: #dc2626;
+    --warning: #d97706;
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --border: #e2e8f0;
+    --text: #1e293b;
+    --text-muted: #64748b;
+    --radius: 8px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Pretendard', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+
+  /* 헤더 */
+  .header {
+    background: var(--primary);
+    color: white;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header h1 { font-size: 20px; font-weight: 700; }
+  .header .version { opacity: 0.8; font-size: 13px; }
+
+  /* 레이아웃 */
+  .container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 20px;
+    display: grid;
+    grid-template-columns: 360px 1fr;
+    gap: 20px;
+    min-height: calc(100vh - 60px);
+  }
+
+  /* 카드 */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+  }
+  .card h2 {
+    font-size: 15px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--primary);
+    color: var(--primary);
+  }
+
+  /* 폼 */
+  .form-group { margin-bottom: 14px; }
+  .form-group label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 4px;
+    color: var(--text-muted);
+  }
+  .form-group select,
+  .form-group input,
+  .form-group textarea {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 14px;
+    color: var(--text);
+    background: #fff;
+    transition: border-color 0.2s;
+    font-family: inherit;
+  }
+  .form-group select:focus,
+  .form-group input:focus,
+  .form-group textarea:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+  }
+  .form-group .hint { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+  /* 버튼 */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 10px 20px;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    width: 100%;
+    font-family: inherit;
+  }
+  .btn-primary { background: var(--primary); color: white; }
+  .btn-primary:hover { background: var(--primary-hover); }
+  .btn-primary:disabled { background: #94a3b8; cursor: not-allowed; }
+  .btn-secondary { background: #f1f5f9; color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover { background: #e2e8f0; }
+  .btn-group { display: flex; gap: 8px; margin-top: 16px; }
+  .btn-group .btn { flex: 1; }
+
+  /* 결과 영역 */
+  .result-area {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  /* 메타 바 (글자수/스타일/캐시) */
+  .meta-bar {
+    display: none;
+    padding: 12px 16px;
+    border-radius: var(--radius);
+    background: var(--card);
+    border: 1px solid var(--border);
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    font-size: 13px;
+  }
+  .meta-bar.visible { display: flex; }
+  .meta-item {
+    padding: 4px 10px;
+    border-radius: 4px;
+    background: #f1f5f9;
+    white-space: nowrap;
+  }
+  .meta-item.style { background: #ede9fe; color: #6d28d9; font-weight: 600; }
+  .meta-item.chars { background: #dbeafe; color: var(--primary-hover); font-weight: 600; }
+  .meta-item.cache { background: #f0fdf4; color: var(--success); }
+
+  /* 탭 */
+  .tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 2px solid var(--border);
+    margin-bottom: 0;
+  }
+  .tab-btn {
+    padding: 10px 20px;
+    border: none;
+    background: none;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: all 0.2s;
+    font-family: inherit;
+  }
+  .tab-btn.active {
+    color: var(--primary);
+    border-bottom-color: var(--primary);
+  }
+  .tab-content { display: none; padding: 16px 0; }
+  .tab-content.active { display: block; }
+
+  /* 원고 표시 (편집 가능) */
+  .manuscript-title {
+    width: 100%;
+    padding: 12px 16px;
+    margin-bottom: 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+    font-family: inherit;
+  }
+  .manuscript-title:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+  }
+  .manuscript-box {
+    width: 100%;
+    background: #fafafa;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 14px;
+    line-height: 1.8;
+    min-height: 500px;
+    max-height: 700px;
+    overflow-y: auto;
+    font-family: inherit;
+    color: var(--text);
+    resize: vertical;
+  }
+  textarea.manuscript-box:focus {
+    outline: none;
+    border-color: var(--primary);
+    background: #fff;
+    box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+  }
+  .analysis-box {
+    background: #fafafa;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 13px;
+    line-height: 1.7;
+    min-height: 300px;
+    max-height: 600px;
+    overflow-y: auto;
+    color: #374151;
+  }
+
+  /* 로딩 */
+  .loading-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.4);
+    z-index: 1000;
+    justify-content: center;
+    align-items: center;
+  }
+  .loading-overlay.visible { display: flex; }
+  .loading-box {
+    background: white;
+    padding: 32px 48px;
+    border-radius: 12px;
+    text-align: center;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+  }
+  .spinner {
+    width: 40px; height: 40px;
+    border: 4px solid #e2e8f0;
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto 12px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 상태 메시지 */
+  .status-msg {
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    margin-top: 8px;
+    display: none;
+  }
+  .status-msg.visible { display: block; }
+  .status-msg.success { background: #f0fdf4; color: var(--success); border: 1px solid #bbf7d0; }
+  .status-msg.error { background: #fef2f2; color: var(--danger); border: 1px solid #fecaca; }
+  .status-msg.info { background: #eff6ff; color: var(--primary-hover); border: 1px solid #bfdbfe; }
+
+  /* 글자수 */
+  .char-count {
+    text-align: right;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 4px;
+  }
+
+  /* 복사/저장 버튼 */
+  .copy-btn, .docx-btn {
+    padding: 4px 10px;
+    font-size: 12px;
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .copy-btn:hover, .docx-btn:hover { background: #f1f5f9; }
+  .sheet-btn {
+    background: var(--success);
+    color: white;
+    border-color: var(--success);
+    font-weight: 600;
+    padding: 4px 14px;
+  }
+  .sheet-btn:hover:not(:disabled) { background: #15803d; border-color: #15803d; }
+  .sheet-btn:disabled {
+    background: #e2e8f0;
+    color: #94a3b8;
+    border-color: #e2e8f0;
+    cursor: not-allowed;
+  }
+  .sheet-btn.done {
+    background: #f0fdf4;
+    color: var(--success);
+    border-color: #bbf7d0;
+    cursor: default;
+  }
+  .manuscript-wrapper { position: relative; }
+  .manuscript-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+    margin-bottom: 8px;
+  }
+  .edit-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-right: auto;
+    align-self: center;
+  }
+  /* 분석 탭은 기존 우상단 오버레이 유지 */
+  .analysis-box ~ .copy-btn,
+  .tab-content:not(#tab-manuscript) .copy-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+  }
+
+  /* 체크박스 */
+  .checkbox-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    background: #f8fafc;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .checkbox-group input { width: auto; margin: 0; }
+
+  /* 반응형 */
+  @media (max-width: 900px) {
+    .container { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>메디셜 블록 원고 생성기</h1>
+  <span class="version">v{{ version }}</span>
+</div>
+
+<div class="container">
+  <!-- 좌측: 설정 패널 -->
+  <div class="card">
+    <h2>원고 설정</h2>
+
+    <div class="form-group">
+      <label>제품명</label>
+      <select id="product">
+        {% for p in products %}
+        <option value="{{ p }}">{{ p }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label>카테고리</label>
+      <input type="text" id="category" value="{{ category }}" readonly style="background:#f1f5f9;">
+      <div class="hint">현재 "{{ category }}" 고정 (지침 추가 시 확장)</div>
+    </div>
+
+    <div class="form-group">
+      <label>키워드</label>
+      <input type="text" id="keyword" placeholder="예: 고혈압 관리">
+    </div>
+
+    <div class="form-group">
+      <label>담당자</label>
+      <input type="text" id="writer" placeholder="이름">
+    </div>
+
+    <div class="form-group">
+      <label>작가 약어 (nt_medium)</label>
+      <input type="text" id="nt_medium" placeholder="예: lhj">
+      <div class="hint">작가 이니셜/닉네임. 링크에 그대로 들어갑니다.</div>
+    </div>
+
+    <div class="form-group">
+      <label>제품 링크 <span id="link-auto-badge" style="font-size:11px;color:var(--success);font-weight:normal;">· 자동</span></label>
+      <input type="text" id="link" placeholder="제품 선택 시 자동 생성됩니다">
+      <div class="hint">
+        <button type="button" onclick="updateProductLink(true)" style="padding:2px 8px;font-size:11px;border:1px solid var(--border);background:#fff;border-radius:4px;cursor:pointer;">재생성</button>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>작성일</label>
+      <input type="date" id="pub-date">
+    </div>
+
+    <div class="form-group">
+      <label>모델</label>
+      <select id="model">
+        {% for m in models %}
+        <option value="{{ m }}"{% if m == 'Opus' %} selected{% endif %}>{{ m }}{% if m == 'Sonnet' %} (빠름){% elif m == 'Opus' %} (고품질){% endif %}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="btn-group">
+      <button class="btn btn-primary" id="btn-generate" onclick="generate()">원고 생성</button>
+      <button class="btn btn-secondary" id="btn-reset" onclick="resetForm()">초기화</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);margin-top:8px;line-height:1.5;">
+      원고 생성 → 우측에서 편집 → <b>"시트에 기입"</b> 버튼으로 최종본 저장
+    </div>
+
+    <div id="status-msg" class="status-msg"></div>
+  </div>
+
+  <!-- 우측: 결과 영역 -->
+  <div class="result-area">
+    <!-- 메타 바 -->
+    <div id="meta-bar" class="meta-bar">
+      <span id="meta-chars" class="meta-item chars"></span>
+      <span id="meta-style" class="meta-item style"></span>
+      <span id="meta-model" class="meta-item" style="background:#fef3c7;color:#b45309;font-weight:600;"></span>
+      <span id="meta-cache" class="meta-item cache"></span>
+      <span id="meta-sheet" class="meta-item"></span>
+    </div>
+
+    <!-- 탭 -->
+    <div class="card" style="padding: 0;">
+      <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('manuscript')">원고</button>
+        <button class="tab-btn" onclick="switchTab('analysis')">분석 (Phase A/B/B-2/D)</button>
+      </div>
+
+      <div style="padding: 16px;">
+        <!-- 원고 탭 (편집 가능) -->
+        <div id="tab-manuscript" class="tab-content active">
+          <div class="manuscript-wrapper">
+            <div class="manuscript-actions">
+              <span class="edit-hint">제목·본문을 직접 수정할 수 있습니다</span>
+              <button class="docx-btn sheet-btn" id="btn-write-sheet" onclick="writeSheet()" disabled title="시트에 기입">시트에 기입</button>
+              <button class="docx-btn" onclick="downloadDocx()" title="워드 저장">워드 저장</button>
+              <button class="copy-btn" onclick="copyManuscript()" title="복사">복사</button>
+            </div>
+            <input type="text" id="title-input" class="manuscript-title" placeholder="제목" />
+            <textarea id="body-input" class="manuscript-box" placeholder="원고 본문이 여기에 표시됩니다."></textarea>
+          </div>
+          <div id="char-count" class="char-count"></div>
+        </div>
+
+        <!-- 분석 탭 -->
+        <div id="tab-analysis" class="tab-content">
+          <div class="manuscript-wrapper">
+            <button class="copy-btn" onclick="copyText('analysis-text')" title="복사">복사</button>
+            <div id="analysis-text" class="analysis-box">
+              Phase A (페르소나) / B (블록 구성) / B-2 (심의·논문) / D (심의 검수) 결과가 여기에 표시됩니다.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 로딩 오버레이 -->
+<div id="loading" class="loading-overlay">
+  <div class="loading-box">
+    <div class="spinner"></div>
+    <div id="loading-text">원고를 생성하고 있습니다...</div>
+    <div style="font-size:12px; color:#94a3b8; margin-top:4px;">Opus 기준 약 3~5분 소요</div>
+  </div>
+</div>
+
+<script>
+  let lastResult = null;
+  // 서버에서 주입된 제품 링크 마스터 {제품명: {code, base_link}}
+  const PRODUCT_LINKS = {{ product_links | tojson }};
+
+  // ── 초기화: 오늘 날짜 기본값 (KST) + 링크 자동 조립 바인딩 ──
+  document.addEventListener('DOMContentLoaded', () => {
+    const now = new Date();
+    const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+    document.getElementById('pub-date').value = kst.toISOString().slice(0, 10);
+
+    // 입력 변경 → 링크 자동 갱신 (사용자가 직접 수정한 링크는 유지)
+    ['product', 'pub-date', 'keyword', 'nt_medium'].forEach(id => {
+      const el = document.getElementById(id);
+      el.addEventListener('change', () => updateProductLink(false));
+      if (el.tagName === 'INPUT') el.addEventListener('blur', () => updateProductLink(false));
+    });
+
+    // 사용자가 링크 직접 수정하면 자동 재조립 비활성 (배지 숨김)
+    document.getElementById('link').addEventListener('input', () => {
+      document.getElementById('link-auto-badge').style.display = 'none';
+    });
+
+    // 본문 편집 시 실시간 글자수 갱신
+    document.getElementById('body-input').addEventListener('input', () => {
+      const n = document.getElementById('body-input').value.length;
+      document.getElementById('char-count').textContent = `${n.toLocaleString()}자`;
+      document.getElementById('meta-chars').textContent = `${n.toLocaleString()}자`;
+    });
+
+    updateProductLink(true);  // 초기 1회
+  });
+
+  // ── 제품 링크 자동 조립 ──
+  // force=true면 수동 편집 여부 무시하고 재생성
+  function updateProductLink(force) {
+    const product = document.getElementById('product').value;
+    const info = PRODUCT_LINKS[product];
+    const linkEl = document.getElementById('link');
+    const badge = document.getElementById('link-auto-badge');
+
+    // 사용자가 직접 수정한 상태라면 force=true일 때만 덮어씀
+    const badgeHidden = badge.style.display === 'none';
+    if (!force && badgeHidden) return;
+
+    if (!info || !info.base_link) {
+      if (force) linkEl.value = '';
+      return;
+    }
+
+    // 날짜: YYYY-MM-DD → YYMMDD
+    const dRaw = document.getElementById('pub-date').value || '';
+    const d = dRaw.length === 10 ? dRaw.slice(2, 4) + dRaw.slice(5, 7) + dRaw.slice(8, 10) : dRaw;
+    // 키워드: 쉼표 구분이면 첫 번째만, 내부 공백 제거
+    const kw = (document.getElementById('keyword').value || '').split(',')[0].trim().replace(/\s/g, '');
+    const ntMedium = document.getElementById('nt_medium').value.trim();
+
+    const ntDetail = `${d}${kw}`;
+    const params = ['nt_source=blog'];
+    if (ntMedium) params.push(`nt_medium=${ntMedium}`);
+    if (ntDetail) params.push(`nt_detail=${ntDetail}`);
+    if (info.code) params.push(`nt_keyword=${info.code}`);
+
+    linkEl.value = `${info.base_link}?${params.join('&')}`;
+    badge.style.display = '';  // 배지 다시 보이기
+  }
+
+  // ── 원고 생성 ──
+  async function generate() {
+    const product = document.getElementById('product').value;
+    const keyword = document.getElementById('keyword').value.trim();
+    const link = document.getElementById('link').value.trim();
+    const writer = document.getElementById('writer').value.trim();
+    const ntMedium = document.getElementById('nt_medium').value.trim();
+    const date = document.getElementById('pub-date').value;
+    const model = document.getElementById('model').value;
+
+    if (!product) return showStatus('제품명을 선택하세요.', 'error');
+    if (!keyword) return showStatus('키워드를 입력하세요.', 'error');
+    if (!link) return showStatus('제품 링크를 입력하세요.', 'error');
+
+    showLoading(true);
+    hideStatus();
+    document.getElementById('btn-generate').disabled = true;
+
+    try {
+      const res = await fetch('/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          product, keyword, link, writer, nt_medium: ntMedium, date, model,
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) { showStatus(data.error || '생성 실패', 'error'); return; }
+
+      lastResult = data;
+
+      // 원고 — 제목/본문 편집 가능 필드에 주입
+      document.getElementById('title-input').value = data.title || '';
+      document.getElementById('body-input').value = data.body || '';
+      document.getElementById('char-count').textContent = `${(data.char_count || 0).toLocaleString()}자`;
+
+      // 분석 탭 (Phase A/B/B-2/D)
+      const a = data.phases || {};
+      const analysis = [
+        "● Phase A — 페르소나 분석\n" + (a.A || ""),
+        "● Phase B — 블록 구성\n" + (a.B || ""),
+        "● Phase B-2 — 심의·논문 사전 준비\n" + (a["B-2"] || ""),
+        "● Phase D — 심의 검수\n" + (a.D || ""),
+      ].join("\n\n");
+      document.getElementById('analysis-text').textContent = analysis;
+
+      // 메타 바
+      document.getElementById('meta-bar').classList.add('visible');
+      document.getElementById('meta-chars').textContent = `${(data.char_count || 0).toLocaleString()}자`;
+      document.getElementById('meta-style').textContent = data.style ? `스타일: ${data.style}` : '스타일: 미판정';
+
+      const u = data.usage || {};
+      const cacheRead = u.cache_read_input_tokens || 0;
+      const cacheCreate = u.cache_creation_input_tokens || 0;
+      const cacheMsg = cacheRead
+        ? `캐시 읽기 ${cacheRead.toLocaleString()} (-90%)`
+        : `캐시 생성 ${cacheCreate.toLocaleString()} (다음부터 할인)`;
+      document.getElementById('meta-cache').textContent = cacheMsg;
+      document.getElementById('meta-model').textContent = `실제 모델: ${u.actual_model || '-'}`;
+
+      // 시트 메타는 아직 기입 전 — 숨김
+      document.getElementById('meta-sheet').style.display = 'none';
+
+      // "시트에 기입" 버튼 활성화 (편집 후 사용자가 명시적으로 누름)
+      const sheetBtn = document.getElementById('btn-write-sheet');
+      sheetBtn.disabled = false;
+      sheetBtn.classList.remove('done');
+      sheetBtn.textContent = '시트에 기입';
+
+      showStatus('원고 생성 완료 — 편집 후 "시트에 기입"을 눌러주세요', 'success');
+      switchTab('manuscript');
+
+    } catch (e) {
+      showStatus('요청 실패: ' + e.message, 'error');
+    } finally {
+      showLoading(false);
+      document.getElementById('btn-generate').disabled = false;
+    }
+  }
+
+  // ── 탭 전환 ──
+  function switchTab(name) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    const btns = document.querySelectorAll('.tab-btn');
+    btns.forEach(b => {
+      if ((name === 'manuscript' && b.textContent.includes('원고')) ||
+          (name === 'analysis' && b.textContent.includes('분석'))) {
+        b.classList.add('active');
+      }
+    });
+  }
+
+  // ── 시트 기입 (편집본 반영) ──
+  async function writeSheet() {
+    if (!lastResult || !lastResult.meta) { showStatus('먼저 원고를 생성하세요.', 'error'); return; }
+    const title = document.getElementById('title-input').value.trim();
+    const body = document.getElementById('body-input').value;
+    if (!body.trim()) { showStatus('원고 본문이 비어 있습니다.', 'error'); return; }
+
+    const btn = document.getElementById('btn-write-sheet');
+    btn.disabled = true;
+    btn.textContent = '기입 중...';
+    hideStatus();
+
+    try {
+      const res = await fetch('/write_sheet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...lastResult.meta,
+          title,
+          body,
+          review: lastResult.review || '',
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showStatus(data.error || '시트 기입 실패', 'error');
+        btn.disabled = false;
+        btn.textContent = '시트에 기입';
+        return;
+      }
+
+      // 성공: 버튼을 완료 상태로 고정 (중복 기입 방지)
+      btn.classList.add('done');
+      btn.textContent = `✓ ${data.sheet_row}행 기입됨`;
+
+      const sheetEl = document.getElementById('meta-sheet');
+      sheetEl.textContent = `시트 ${data.sheet_row}행 기입`;
+      sheetEl.style.display = '';
+
+      // 편집본 기준 글자수 재계산 반영
+      document.getElementById('meta-chars').textContent = `${(data.char_count || 0).toLocaleString()}자`;
+      document.getElementById('char-count').textContent = `${(data.char_count || 0).toLocaleString()}자`;
+
+      showStatus(`시트 ${data.sheet_row}행에 기입 완료`, 'success');
+    } catch (e) {
+      showStatus('시트 기입 실패: ' + e.message, 'error');
+      btn.disabled = false;
+      btn.textContent = '시트에 기입';
+    }
+  }
+
+  // ── 워드 저장 (편집본 반영) ──
+  async function downloadDocx() {
+    const title = document.getElementById('title-input').value.trim();
+    const body = document.getElementById('body-input').value;
+    if (!body.trim()) { showStatus('먼저 원고를 생성하세요.', 'error'); return; }
+    const filename = (title || document.getElementById('keyword').value || '원고').slice(0, 80);
+    try {
+      const res = await fetch('/download_docx', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, body, filename }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showStatus(err.error || '워드 저장 실패', 'error');
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename + '.docx';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showStatus('워드 파일 다운로드 완료', 'success');
+    } catch (e) {
+      showStatus('워드 저장 실패: ' + e.message, 'error');
+    }
+  }
+
+  // ── 복사 ──
+  function copyText(elementId) {
+    const el = document.getElementById(elementId);
+    const text = el.value !== undefined ? el.value : el.textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      const btn = el.closest('.manuscript-wrapper').querySelector('.copy-btn');
+      if (btn) { btn.textContent = '복사됨!'; setTimeout(() => btn.textContent = '복사', 1500); }
+    });
+  }
+
+  // 원고 탭: 제목+본문 합쳐서 복사 (편집본 반영)
+  function copyManuscript() {
+    const title = document.getElementById('title-input').value.trim();
+    const body = document.getElementById('body-input').value;
+    const text = title ? `[제목] ${title}\n\n${body}` : body;
+    navigator.clipboard.writeText(text).then(() => {
+      const btn = document.querySelector('#tab-manuscript .copy-btn');
+      if (btn) { btn.textContent = '복사됨!'; setTimeout(() => btn.textContent = '복사', 1500); }
+    });
+  }
+
+  // ── 초기화 ──
+  function resetForm() {
+    document.getElementById('keyword').value = '';
+    document.getElementById('link').value = '';
+    document.getElementById('link-auto-badge').style.display = '';
+    updateProductLink(true);
+    document.getElementById('title-input').value = '';
+    document.getElementById('body-input').value = '';
+    document.getElementById('analysis-text').textContent = 'Phase A (페르소나) / B (블록 구성) / B-2 (심의·논문) / D (심의 검수) 결과가 여기에 표시됩니다.';
+    document.getElementById('char-count').textContent = '';
+    document.getElementById('meta-bar').classList.remove('visible');
+    const sheetBtn = document.getElementById('btn-write-sheet');
+    sheetBtn.disabled = true;
+    sheetBtn.classList.remove('done');
+    sheetBtn.textContent = '시트에 기입';
+    lastResult = null;
+    hideStatus();
+    switchTab('manuscript');
+  }
+
+  // ── 유틸 ──
+  function showLoading(visible) {
+    document.getElementById('loading').classList.toggle('visible', visible);
+  }
+  function showStatus(msg, type) {
+    const el = document.getElementById('status-msg');
+    el.textContent = msg;
+    el.className = 'status-msg visible ' + type;
+  }
+  function hideStatus() {
+    document.getElementById('status-msg').className = 'status-msg';
+  }
+</script>
+
+</body>
+</html>
