@@ -5,12 +5,14 @@ rank_checker.py - 순위 체커 통합 (공통 시트 연동)
 
 공통 시트의 '순위 체커' 탭에서 체크박스 트리거 →
 네이버 메인(통합검색) 순위 우선 확인 → 없으면 블로그탭 →
-결과를 자사 발행리스트 J열에 기록, 블로그탭이면 T열에 "블탭"
+결과를 원본 탭 J열에 기록, 블로그탭이면 블탭 표시열에 "블탭"
+  - 자사 발행리스트: 블탭 표시 = T열
+  - 내부 발행리스트: 블탭 표시 = Q열
 
-순위 체커 탭 구조:
+순위 체커 탭 구조 (자사+내부 섞여서 관리):
   A: 파라미터값 | B: 키워드 | C: 링크 | D: 실행(체크박스)
   E: 메인1 | F: 블탭1 | G: 메인2 | H: 블탭2 | I: 메인3 | J: 블탭3
-  K: 최초체크일 | L: 상태
+  K: 최초체크일 | L: 상태 | M: 발행일
 
 실행 모드:
   python rank_checker.py          # 1회 실행 (체크된 행만)
@@ -37,6 +39,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 # ━━━━━━━━━━━━━━━━━━━━ 설정 ━━━━━━━━━━━━━━━━━━━━
 SPREADSHEET_ID = "1jflcdbmBjQsY4hp8rNULXGGVqb64fGno4kudlTJoqM4"
 TAB_SOURCE     = "자사 발행리스트"
+TAB_INTERNAL   = "내부 발행리스트"
 TAB_CHECKER    = "순위 체커"
 CRED_FILE      = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "..", "manuscript_generator", "credentials.json")
@@ -49,6 +52,14 @@ SRC_COL_H = 7   # 파라미터값 (조인키)
 SRC_COL_J = 9   # 순위 결과
 SRC_COL_M = 12  # 링크 (타겟 URL)
 SRC_COL_T = 19  # 블탭 표시
+
+# 내부 발행리스트 열 인덱스 (0-based)
+INT_COL_A = 0   # 발행일
+INT_COL_E = 4   # 키워드
+INT_COL_H = 7   # 파라미터값 (조인키)
+INT_COL_J = 9   # 순위 결과
+INT_COL_M = 12  # 링크 (타겟 URL)
+INT_COL_Q = 16  # 블탭 표시
 
 # 순위 체커 탭 열 인덱스 (0-based)
 CHK_COL_A = 0   # 파라미터값
@@ -68,6 +79,9 @@ CHK_COL_M = 12  # 발행일 (자사 발행리스트 A열)
 # 노란색 배경 (순위 변동 표시)
 LIGHT_YELLOW = {"backgroundColor": {"red": 1, "green": 1, "blue": 0.8}}
 WHITE = {"backgroundColor": {"red": 1, "green": 1, "blue": 1}}
+# 빨간색 배경 (고아 행 표시 — 발행리스트에서 사라진 파라미터)
+LIGHT_RED = {"backgroundColor": {"red": 1, "green": 0.85, "blue": 0.85}}
+ORPHAN_LABEL = "고아 (발행리스트 없음)"
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
@@ -76,7 +90,7 @@ WHITE = {"backgroundColor": {"red": 1, "green": 1, "blue": 1}}
 # ────────────────────────────────────────────────
 
 def connect_sheets():
-    """공통 시트 연결 → (spreadsheet, ws_source, ws_checker) 반환"""
+    """공통 시트 연결 → (spreadsheet, ws_source, ws_internal, ws_checker) 반환"""
     scope = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -91,8 +105,9 @@ def connect_sheets():
     gc = gspread.authorize(creds)
     spreadsheet = gc.open_by_key(SPREADSHEET_ID)
     ws_source = spreadsheet.worksheet(TAB_SOURCE)
+    ws_internal = spreadsheet.worksheet(TAB_INTERNAL)
     ws_checker = ensure_checker_tab(spreadsheet)
-    return spreadsheet, ws_source, ws_checker
+    return spreadsheet, ws_source, ws_internal, ws_checker
 
 
 def ensure_checker_tab(spreadsheet):
@@ -159,20 +174,30 @@ def normalize_date(date_str):
     return date_str  # 파싱 실패 시 원본
 
 
-def sync_tab(ws_source, ws_checker):
-    """자사 발행리스트의 (파라미터, 키워드, 링크)를 순위 체커 탭에 동기화"""
+def sync_tab(ws_source, ws_internal, ws_checker):
+    """자사+내부 발행리스트의 (파라미터, 키워드, 링크)를 순위 체커 탭에 동기화"""
     src_rows = ws_source.get_all_values()
+    int_rows = ws_internal.get_all_values()
     chk_rows = ws_checker.get_all_values()
 
-    # 소스에서 유효한 행 추출 (H열 파라미터 있는 행만)
-    src_data = {}
+    # 파라미터 → (키워드, 링크, 발행일) 매핑 (자사 우선, 내부 보충)
+    merged_data = {}
     for row in src_rows[1:]:
         param = _cell(row, SRC_COL_H)
         keyword = _cell(row, SRC_COL_E)
         link = _cell(row, SRC_COL_M)
-        pub_date = normalize_date(_cell(row, SRC_COL_A))  # YYYY-MM-DD로 변환
+        pub_date = normalize_date(_cell(row, SRC_COL_A))
         if param:
-            src_data[param] = (keyword, link, pub_date)
+            merged_data[param] = (keyword, link, pub_date)
+
+    for row in int_rows[1:]:
+        param = _cell(row, INT_COL_H)
+        keyword = _cell(row, INT_COL_E)
+        link = _cell(row, INT_COL_M)
+        pub_date = normalize_date(_cell(row, INT_COL_A))
+        # 자사에 이미 있는 파라미터는 덮어쓰지 않음
+        if param and param not in merged_data:
+            merged_data[param] = (keyword, link, pub_date)
 
     # 체커 탭 기존 파라미터 목록
     chk_params = set()
@@ -183,7 +208,7 @@ def sync_tab(ws_source, ws_checker):
 
     # 신규 행 추가 (13열: A~M)
     new_rows = []
-    for param, (kw, link, pub_date) in src_data.items():
+    for param, (kw, link, pub_date) in merged_data.items():
         if param not in chk_params:
             new_rows.append([param, kw, link, False,
                              "", "", "", "", "", "", "", "", pub_date])
@@ -204,8 +229,8 @@ def sync_tab(ws_source, ws_checker):
     updates = []
     for idx, row in enumerate(chk_rows[1:], start=2):
         param = _cell(row, CHK_COL_A)
-        if param in src_data:
-            src_kw, src_link, src_pub = src_data[param]
+        if param in merged_data:
+            src_kw, src_link, src_pub = merged_data[param]
             cur_kw = _cell(row, CHK_COL_B)
             cur_link = _cell(row, CHK_COL_C)
             cur_pub = _cell(row, CHK_COL_M)
@@ -228,10 +253,74 @@ def sync_tab(ws_source, ws_checker):
     if not new_rows and not updates:
         print("    동기화: 변경 없음")
 
+    # 고아 행 감지/표시 (발행리스트에서 사라진 파라미터 → L열 마킹 + 빨간 배경)
+    mark_orphan_rows(ws_checker, chk_rows, merged_data)
+
     # 발행일(M열) 기준 내림차순 정렬 (최신이 위로)
     sort_by_pub_date(ws_checker)
 
-    return src_rows
+    return src_rows, int_rows
+
+
+def mark_orphan_rows(ws_checker, chk_rows, merged_data):
+    """순위체커 A열 파라미터가 발행리스트에 없으면 L열에 고아 표시 + 빨간 배경.
+    반대로, 고아였다가 발행리스트에 다시 나타나면 L열 표시/배경 복구."""
+    cell_updates = []   # L열 텍스트 변경 (batch_update용)
+    orphan_rows = []    # 빨간 배경 적용할 행
+    recovered_rows = [] # 흰 배경 복구할 행
+
+    for idx, row in enumerate(chk_rows[1:], start=2):
+        if not row:
+            continue
+        param = _cell(row, CHK_COL_A)
+        if not param:
+            continue
+        cur_status = _cell(row, CHK_COL_L)
+        is_orphan = param not in merged_data
+        was_marked = cur_status.startswith("고아") or cur_status == "오류: 매핑 실패"
+
+        if is_orphan and not was_marked:
+            # 새로 고아가 된 행: L열 비어있거나 다른 정상 상태였더라도 마킹
+            # (단 정상 상태는 덮어쓰지 않음 — 발행 결과 보존)
+            if not cur_status:
+                cell_updates.append({
+                    "range": f"L{idx}",
+                    "values": [[ORPHAN_LABEL]],
+                })
+            orphan_rows.append(idx)
+        elif is_orphan and was_marked:
+            # 이미 마킹된 고아 — 라벨만 통일
+            if cur_status != ORPHAN_LABEL:
+                cell_updates.append({
+                    "range": f"L{idx}",
+                    "values": [[ORPHAN_LABEL]],
+                })
+            orphan_rows.append(idx)
+        elif not is_orphan and was_marked:
+            # 발행리스트에 다시 나타남 — 복구
+            cell_updates.append({
+                "range": f"L{idx}",
+                "values": [[""]],
+            })
+            recovered_rows.append(idx)
+
+    if cell_updates:
+        ws_checker.batch_update(cell_updates)
+
+    # 배경색은 format이라 batch가 따로. 행 수 적을 때만 적용 (과도한 API 호출 방지)
+    for idx in orphan_rows:
+        ws_checker.format(f"A{idx}:M{idx}", LIGHT_RED)
+    for idx in recovered_rows:
+        ws_checker.format(f"A{idx}:M{idx}", WHITE)
+
+    if orphan_rows:
+        print(f"    고아 행 감지: {len(orphan_rows)}건 (L열 빨간색 표시)")
+        for idx in orphan_rows[:10]:
+            print(f"      행{idx}")
+        if len(orphan_rows) > 10:
+            print(f"      ... 외 {len(orphan_rows)-10}건")
+    if recovered_rows:
+        print(f"    고아 복구: {len(recovered_rows)}건 (발행리스트에 다시 나타남)")
 
 
 def sort_by_pub_date(ws_checker):
@@ -612,11 +701,13 @@ SLOT_COLS = {
 }
 
 
-def write_result(ws_source, ws_checker, spreadsheet,
-                 src_row_num, chk_row_num,
+def write_result(ws_source, ws_internal, ws_checker, spreadsheet,
+                 source_type, target_row_num, chk_row_num,
                  main_rank, blog_rank, slot,
                  prev_main_str, prev_blog_str):
-    """순위 체커 탭(메인+블탭) + 자사 발행리스트(J열+T열) 기록 + 노란색"""
+    """순위 체커 탭(메인+블탭) + 원본 탭(J열+블탭 표시열) 기록 + 노란색
+    source_type: "source"(자사, 블탭=T) | "internal"(내부, 블탭=Q)
+    """
     main_str = f"{main_rank}위" if main_rank is not None else "순위 밖"
     blog_str = f"{blog_rank}위" if blog_rank is not None else "순위 밖"
 
@@ -654,34 +745,48 @@ def write_result(ws_source, ws_checker, spreadsheet,
             ws_checker.format(f"{blog_col}{chk_row_num}", LIGHT_YELLOW)
             print(f"           블탭 순위 상승! ({prev_blog_str} → {blog_str}) 노란색")
 
-    # ── 자사 발행리스트: J열(순위) + T열(블탭) ──
+    # ── 원본 탭: J열(순위) + 블탭 표시열 기록 ──
+    # 자사=T열, 내부=Q열
+    if source_type == "internal":
+        target_ws = ws_internal
+        blog_flag_col = "Q"
+        label = "내부"
+    else:
+        target_ws = ws_source
+        blog_flag_col = "T"
+        label = "자사"
+
     # 메인 우선 → 없으면 블로그탭 → 둘 다 없으면 기입 안 함
     if main_rank is not None:
-        ws_source.update(values=[[main_str]], range_name=f"J{src_row_num}")
-        ws_source.update(values=[[""]], range_name=f"T{src_row_num}")
+        target_ws.update(values=[[main_str]], range_name=f"J{target_row_num}")
+        target_ws.update(values=[[""]], range_name=f"{blog_flag_col}{target_row_num}")
     elif blog_rank is not None:
-        ws_source.update(values=[[blog_str]], range_name=f"J{src_row_num}")
-        ws_source.update(values=[["블탭"]], range_name=f"T{src_row_num}")
+        target_ws.update(values=[[blog_str]], range_name=f"J{target_row_num}")
+        target_ws.update(values=[["블탭"]], range_name=f"{blog_flag_col}{target_row_num}")
 
-    # 자사 발행리스트 J열 순위 상승 시 노란색
+    # 원본 탭 J열 순위 상승 시 노란색
     if slot in ("slot2", "slot3") and prev_main_str:
         prev_j = parse_rank(prev_main_str) if parse_rank(prev_main_str) else parse_rank(prev_blog_str)
         curr_j = main_rank if main_rank is not None else blog_rank
         # 순위 상승일 때만 노란색
         j_up = (curr_j is not None and
                 (prev_j is None or curr_j < prev_j))
-        ws_source.format(f"J{src_row_num}", LIGHT_YELLOW if j_up else WHITE)
+        target_ws.format(f"J{target_row_num}", LIGHT_YELLOW if j_up else WHITE)
 
-    return main_str, blog_str
+    return main_str, blog_str, label
 
 
-def build_param_row_map(src_rows):
-    """자사 발행리스트에서 파라미터값 → 행번호 매핑"""
+def build_param_row_map(src_rows, int_rows):
+    """파라미터값 → (source_type, 행번호) 매핑. 자사 우선, 내부 보충"""
     param_map = {}
     for idx, row in enumerate(src_rows[1:], start=2):
         param = _cell(row, SRC_COL_H)
         if param:
-            param_map[param] = idx
+            param_map[param] = ("source", idx)
+    for idx, row in enumerate(int_rows[1:], start=2):
+        param = _cell(row, INT_COL_H)
+        if param and param not in param_map:
+            param_map[param] = ("internal", idx)
     return param_map
 
 
@@ -689,14 +794,16 @@ def build_param_row_map(src_rows):
 #  행 처리
 # ────────────────────────────────────────────────
 
-def process_rows(ws_source, ws_checker, spreadsheet, driver, targets, param_map):
+def process_rows(ws_source, ws_internal, ws_checker, spreadsheet, driver, targets, param_map):
     """대상 행들의 순위 체크 + 결과 기록"""
     for i, (chk_row_num, param, kw, link, slot, prev_main, prev_blog, row_data) in enumerate(targets):
-        src_row_num = param_map.get(param)
-        if not src_row_num:
-            print(f"\n  [{i+1}/{len(targets)}] {param} — 자사 발행리스트에서 행 못 찾음, 스킵")
-            ws_checker.update(values=[["오류: 매핑 실패"]], range_name=f"L{chk_row_num}")
+        mapping = param_map.get(param)
+        if not mapping:
+            print(f"\n  [{i+1}/{len(targets)}] {param} — 자사/내부 발행리스트에서 행 못 찾음, 스킵")
+            ws_checker.update(values=[[ORPHAN_LABEL]], range_name=f"L{chk_row_num}")
+            ws_checker.format(f"A{chk_row_num}:M{chk_row_num}", LIGHT_RED)
             continue
+        source_type, target_row_num = mapping
 
         if not kw or not link:
             print(f"\n  [{i+1}/{len(targets)}] {param} — 키워드 또는 링크 없음, 스킵")
@@ -704,7 +811,8 @@ def process_rows(ws_source, ws_checker, spreadsheet, driver, targets, param_map)
             continue
 
         slot_label = slot.replace("slot", "")
-        print(f"\n  [{i+1}/{len(targets)}] 키워드: {kw}")
+        origin_label = "내부" if source_type == "internal" else "자사"
+        print(f"\n  [{i+1}/{len(targets)}] [{origin_label}] 키워드: {kw}")
         print(f"           타겟: {link}")
         print(f"           기록 위치: {slot_label}차")
 
@@ -725,8 +833,8 @@ def process_rows(ws_source, ws_checker, spreadsheet, driver, targets, param_map)
             print(blog_str)
 
             write_result(
-                ws_source, ws_checker, spreadsheet,
-                src_row_num, chk_row_num,
+                ws_source, ws_internal, ws_checker, spreadsheet,
+                source_type, target_row_num, chk_row_num,
                 main_rank, blog_rank, slot, prev_main, prev_blog,
             )
 
@@ -825,10 +933,10 @@ def run_once(mode="manual"):
     print("=" * 50)
 
     print("\n[1] Google Sheets 연결 중...")
-    spreadsheet, ws_source, ws_checker = connect_sheets()
+    spreadsheet, ws_source, ws_internal, ws_checker = connect_sheets()
 
     print("\n[2] 탭 동기화...")
-    src_rows = sync_tab(ws_source, ws_checker)
+    src_rows, int_rows = sync_tab(ws_source, ws_internal, ws_checker)
 
     # 체커 탭 다시 읽기 (동기화 후)
     chk_rows = ws_checker.get_all_values()
@@ -854,7 +962,7 @@ def run_once(mode="manual"):
 
     print(f"    {len(targets)}개 처리 대상")
 
-    param_map = build_param_row_map(src_rows)
+    param_map = build_param_row_map(src_rows, int_rows)
 
     print("\n[3] 브라우저 준비 중...")
     driver = create_driver()
@@ -864,7 +972,7 @@ def run_once(mode="manual"):
     print("-" * 50)
 
     try:
-        driver = process_rows(ws_source, ws_checker, spreadsheet,
+        driver = process_rows(ws_source, ws_internal, ws_checker, spreadsheet,
                               driver, targets, param_map)
     finally:
         try:
@@ -899,8 +1007,8 @@ def watch(interval=60):
                 break
 
             try:
-                spreadsheet, ws_source, ws_checker = connect_sheets()
-                src_rows = sync_tab(ws_source, ws_checker)
+                spreadsheet, ws_source, ws_internal, ws_checker = connect_sheets()
+                src_rows, int_rows = sync_tab(ws_source, ws_internal, ws_checker)
                 chk_rows = ws_checker.get_all_values()
             except Exception as e:
                 now = datetime.now().strftime("%H:%M:%S")
@@ -929,14 +1037,14 @@ def watch(interval=60):
 
             print(f"\n\n  >> 체크 감지! 3영업일 이내 {len(targets)}개 처리 시작")
 
-            param_map = build_param_row_map(src_rows)
+            param_map = build_param_row_map(src_rows, int_rows)
 
             if driver is None:
                 print("  브라우저 준비 중...")
                 driver = create_driver()
                 print("  준비 완료!")
 
-            driver = process_rows(ws_source, ws_checker, spreadsheet,
+            driver = process_rows(ws_source, ws_internal, ws_checker, spreadsheet,
                                   driver, targets, param_map)
             print("\n  처리 완료! 다시 대기 중...")
 
