@@ -21,10 +21,12 @@ from api_client import call_claude_api, MODELS
 from prompt_builder import build_system_prompt, build_user_prompt
 from output_parser import parse
 from docx_writer import build_docx_bytes
-from drive_uploader import upload_docx_bytes
+from html_formatter import build_html_preview
+from docx_formatter import normalize_text
 from sheet_writer import (
     write_row, _open_ws, DEFAULT_TAB_NAME,
     load_product_links, build_product_link,
+    update_l_column_bulk,
 )
 
 app = Flask(__name__)
@@ -168,9 +170,12 @@ def generate():
 
     parsed = parse(holder["text"])
 
+    # 편집창 = 미리보기/워드 출력 결과 일치 보장 — 본문 줄바꿈 정규화 후 반환
+    normalized_body = normalize_text(parsed["body"])
+
     return jsonify({
         "title": parsed["title"],
-        "body": parsed["body"],
+        "body": normalized_body,
         "char_count": parsed["char_count"],
         "style": parsed["style"],
         "blocks_summary": parsed["blocks_summary"],
@@ -205,6 +210,7 @@ def write_sheet_route():
     title = data.get("title") or ""
     body = data.get("body") or ""
     review = data.get("review") or ""
+    filename = (data.get("filename") or "").strip()
 
     if not body.strip():
         return jsonify({"error": "원고 본문이 비어 있습니다."}), 400
@@ -214,15 +220,10 @@ def write_sheet_route():
     # 편집본 기준으로 글자수 재계산
     char_count = len(body)
 
-    # Drive 업로드 (편집본으로 docx 생성)
-    drive_link = None
-    try:
-        docx_bytes = build_docx_bytes(title, body)
-        fname_base = f"{keyword}_{product}".strip("_") or "원고"
-        fname_base = re.sub(r'[\\/:*?"<>|]', "_", fname_base)[:80]
-        _fid, drive_link = upload_docx_bytes(docx_bytes, f"{fname_base}.docx")
-    except Exception as e:
-        print(f"[write_sheet] Drive 업로드 실패: {e}")
+    # 시트 L열 '원고 다운로드' 링크 — 현 요청의 호스트를 기본값으로 사용
+    # (APP_BASE_URL 환경변수가 있으면 그게 우선)
+    base_url = (os.environ.get("APP_BASE_URL", "").strip()
+                or request.host_url.rstrip("/"))
 
     try:
         sheet_row = write_row(
@@ -230,14 +231,14 @@ def write_sheet_route():
             writer, link,
             title, body, char_count,
             review, model_key,
-            drive_url=drive_link,
+            download_base_url=base_url,
+            filename=filename,
         )
     except Exception as e:
         return jsonify({"error": f"시트 기입 실패: {e}"}), 500
 
     return jsonify({
         "sheet_row": sheet_row,
-        "drive_link": drive_link,
         "char_count": char_count,
     })
 
@@ -254,6 +255,40 @@ def _docx_response(docx_bytes, filename):
             "Content-Length": str(len(docx_bytes)),
         },
     )
+
+
+@app.route("/migrate_l_column", methods=["POST"])
+def migrate_l_column():
+    """기존 행들의 L열 HYPERLINK를 일괄로 /download_row/N 링크로 갱신."""
+    if not _auth_check(request):
+        return jsonify({"error": "인증 실패"}), 403
+    data = request.get_json(silent=True) or {}
+    dry = bool(data.get("dry_run", False))
+    base_url = (os.environ.get("APP_BASE_URL", "").strip()
+                or request.host_url.rstrip("/"))
+    try:
+        result = update_l_column_bulk(base_url, dry_run=dry)
+        result["base_url"] = base_url
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": f"L열 일괄 갱신 실패: {e}"}), 500
+
+
+@app.route("/preview_html", methods=["POST"])
+def preview_html():
+    """편집본(제목/본문)을 받아 서식 적용된 HTML 미리보기 반환."""
+    if not _auth_check(request):
+        return jsonify({"error": "인증 실패"}), 403
+    data = request.get_json(force=True) or {}
+    title = data.get("title", "") or ""
+    body = data.get("body", "") or ""
+    if not body.strip():
+        return jsonify({"error": "body가 비어 있습니다."}), 400
+    try:
+        html = build_html_preview(title, body)
+        return jsonify({"html": html})
+    except Exception as e:
+        return jsonify({"error": f"미리보기 생성 실패: {e}"}), 500
 
 
 @app.route("/download_docx", methods=["POST"])
