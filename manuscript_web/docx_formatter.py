@@ -51,25 +51,29 @@ def parse_annotation(annotation_text):
 
     # `'단어' 볼드` / `'단어' 밑줄` — 단어별 볼드/밑줄 추출 (v2.1.4~)
     # 여러 그룹(`'A' 볼드, 'B' 볼드`)도 모두 수집하도록 finditer 사용
-    for m in re.finditer(r"((?:'[^']+'\s*,?\s*)+)\s*(?:글꼴\s*두껍게|두껍게|볼드|bold)", text, re.IGNORECASE):
+    # `\s*[가-힣]*` — '단어'에 / '단어' 에 / '단어'는 같은 조사(공백 포함) 허용
+    # `.strip('*')` — LLM이 ㄴ 지시 안에 넣는 `'**단어**'` 마크다운 볼드 껍질 제거
+    # (본문 visible_text에는 `**` 가 없어서 껍질 붙은 채로는 단어 매칭 실패)
+    for m in re.finditer(r"((?:'[^']+'\s*[가-힣]*\s*,?\s*)+)\s*(?:글꼴\s*두껍게|두껍게|볼드|bold)", text, re.IGNORECASE):
         for w in re.findall(r"'([^']+)'", m.group(1)):
-            fmt.setdefault('bolded_words', []).append(w)
-    for m in re.finditer(r"((?:'[^']+'\s*,?\s*)+)\s*(?:밑줄|underline)", text, re.IGNORECASE):
+            fmt.setdefault('bolded_words', []).append(w.strip('*'))
+    for m in re.finditer(r"((?:'[^']+'\s*[가-힣]*\s*,?\s*)+)\s*(?:밑줄|underline)", text, re.IGNORECASE):
         for w in re.findall(r"'([^']+)'", m.group(1)):
-            fmt.setdefault('underlined_words', []).append(w)
+            fmt.setdefault('underlined_words', []).append(w.strip('*'))
 
     # 볼드 — '글꼴 두껍게' / '두껍게' / '볼드' / 'bold' (앞에 '단어' 없는 경우만 문단 전체)
     _bold_m = re.search(r"(?<!['\"])\s*(글꼴\s*두껍게|두껍게|볼드|bold)", text, re.IGNORECASE)
     if _bold_m:
         _before = text[:_bold_m.start()].rstrip()
-        if not re.search(r"""['\"][^'\"]+['\"]\s*,?\s*$""", _before):
+        # 바로 앞이 `'단어'` 또는 `'단어'에` / `'단어' 에` 식으로 끝나면 bolded_words 용
+        if not re.search(r"""['\"][^'\"]+['\"]\s*[가-힣]*\s*,?\s*$""", _before):
             fmt['bold'] = True
 
     # 밑줄 — 동일 패턴
     _under_m = re.search(r"(?<!['\"])\s*(밑줄|underline)", text, re.IGNORECASE)
     if _under_m:
         _before = text[:_under_m.start()].rstrip()
-        if not re.search(r"""['\"][^'\"]+['\"]\s*,?\s*$""", _before):
+        if not re.search(r"""['\"][^'\"]+['\"]\s*[가-힣]*\s*,?\s*$""", _before):
             fmt['underline'] = True
 
     # 이탤릭 / 기울임
@@ -94,9 +98,11 @@ def parse_annotation(annotation_text):
     for color_name in color_names:
         # 뒤에 "형광펜"이 붙으면 하이라이트 매칭 쪽으로 넘기기 (하늘색/노란색 중복 매칭 방지)
         # 여러 단어 그룹(`'A' 빨간색, 'B' 빨간색`)도 모두 수집
-        for m in re.finditer(rf"((?:'[^']+'\s*,?\s*)+)\s*{color_name}(?!\s*형광펜)", text):
+        # `\s*[가-힣]*` — '단어'에 / '단어' 에 / '단어'는 같은 조사(공백 포함) 허용
+        # `.strip('*')` — `'**단어**'` 마크다운 껍질 제거 (본문 매칭 실패 방지)
+        for m in re.finditer(rf"((?:'[^']+'\s*[가-힣]*\s*,?\s*)+)\s*{color_name}(?!\s*형광펜)", text):
             for w in re.findall(r"'([^']+)'", m.group(1)):
-                fmt['colored_words'].append((w, color_name))
+                fmt['colored_words'].append((w.strip('*'), color_name))
 
     # 헥스 직접 지정: '빨간색(FF0000)', '파란색(0000FF)', '파란색(1155CC)' 등
     m = re.search(
@@ -118,7 +124,8 @@ def parse_annotation(annotation_text):
             if m2:
                 before = text[:m2.start()].rstrip()
                 # 바로 앞이 `'단어'` 또는 `"단어"` 로 끝나면 colored_words 용 → skip
-                if re.search(r"""['\"][^'\"]+['\"]\s*$""", before):
+                # `\s*[가-힣]*` — '단어'에, '단어' 에 같은 조사(공백 포함) 붙은 형태도 skip
+                if re.search(r"""['\"][^'\"]+['\"]\s*[가-힣]*\s*$""", before):
                     continue
                 tail = text[m2.end():].strip()
                 if tail.startswith('형광펜'):
@@ -142,18 +149,21 @@ def parse_annotation(annotation_text):
     }
     # v2.1.4~: 먼저 `'단어' 색상 형광펜` 형태를 단어별 형광펜으로 추출.
     # 남은(단독 `ㄴ 색상 형광펜`) 지시는 fmt['highlight']로 문단 전체 적용.
+    # `\s*[가-힣]*` — '단어'에, '단어' 에 같은 조사(공백 포함) 허용 (예: '블러디션 배합' 에 검정 형광펜)
+    # `.strip('*')` — `'**단어**'` 마크다운 껍질 제거 (본문 매칭 실패 방지)
     for hl_pattern, hl_val in highlight_map.items():
         # 여러 단어 그룹(`'A' 노란 형광펜, 'B' 노란 형광펜`)도 모두 수집
-        for m in re.finditer(rf"((?:'[^']+'\s*,?\s*)+)\s*(?:{hl_pattern})색?\s*형광펜", text):
+        for m in re.finditer(rf"((?:'[^']+'\s*[가-힣]*\s*,?\s*)+)\s*(?:{hl_pattern})색?\s*형광펜", text):
             for w in re.findall(r"'([^']+)'", m.group(1)):
-                fmt.setdefault('highlighted_words', []).append((w, hl_val))
+                fmt.setdefault('highlighted_words', []).append((w.strip('*'), hl_val))
     for hl_pattern, hl_val in highlight_map.items():
         # 단어 추출 뒤에 남은 일반 형광펜 — 앞에 `'..'`가 없는 경우만
         m2 = re.search(rf"(?<!['\"])(?:{hl_pattern})색?\s*형광펜", text)
         if m2:
             # 이 매치 바로 앞에 `'단어'` 가 붙어 있으면 이미 highlighted_words로 잡힌 것 → skip
+            # `\s*[가-힣]*` — '단어'에, '단어' 에 같은 조사(공백 포함) 붙은 형태도 skip
             before = text[:m2.start()].rstrip()
-            if re.search(r"""['\"][^'\"]+['\"]\s*$""", before):
+            if re.search(r"""['\"][^'\"]+['\"]\s*[가-힣]*\s*$""", before):
                 continue
             fmt['highlight'] = hl_val
             break
@@ -693,7 +703,7 @@ _NORM_MIN_LEN = 10
 _NORM_MAX_LEN = 28
 _NORM_GUARD_LEN = 5            # 의도적 짧은 줄 기준 (네?, 정말? 등)
 _NORM_ORPHAN_MIN = 8           # 분할 후 뒤조각이 이보다 짧으면 orphan — 분할 위치를 앞으로 당김
-_NORM_END_PUNCT = '?!~…'       # 의도적 종결부호 (마침표 . 는 제외 — 합침 허용)
+_NORM_END_PUNCT = '.?!~…'      # 의도적 종결부호 — 마침표 포함: 문장 끝난 줄은 다음 줄과 합치지 않음
 
 _CONNECTIVE_ENDINGS = re.compile(
     r'(어서|아서|고|며|면서|지만|는데|은데|니까|'

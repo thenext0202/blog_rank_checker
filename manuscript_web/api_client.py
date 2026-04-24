@@ -5,7 +5,8 @@
 """
 import threading
 
-# 선택 가능한 모델 (최신 4.6 세대) — Opus가 기본 (dict 순서 = UI 순서)
+# 선택 가능한 모델 (Opus/Sonnet 둘 다 4.6) — Opus가 기본 (dict 순서 = UI 순서)
+# 4.7 테스트해봤지만 서식 지시를 더 촘촘히 내보내서 현재 포맷터가 처리 못함 → 버그 수정 후 재평가.
 MODELS = {
     "Opus":   "claude-opus-4-6",
     "Sonnet": "claude-sonnet-4-6",
