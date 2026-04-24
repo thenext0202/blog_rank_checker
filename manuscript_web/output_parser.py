@@ -226,16 +226,11 @@ def _merge_same_target_annotations(body):
                         _flush_buckets(order, buckets, out)
                         out.append(orig)
                         continue
-                    # 전체 라인 볼드 + 동일 내용 ㄴ '...' 볼드(만) 지시 = 중복 → 드롭
-                    if full_bold_inner is not None and _is_bold_only_specs(specs):
-                        tgt_norm = (tgt or "").replace(" ", "")
-                        inner_norm = full_bold_inner.replace(" ", "")
-                        if (not tgt) or tgt_norm == inner_norm:
-                            continue
-                    # merge: 타겟이 본문 전체와 일치하면 타겟 생략
-                    is_full = (not tgt) or (tgt == content_clean) or (
-                        tgt.replace(" ", "") == content_clean.replace(" ", "")
-                    )
+                    # v2.1.5~: 본문이 `**..**` 볼드여도 사용자가 명시한 `ㄴ '..' 볼드` 주석은 유지.
+                    # (이전엔 "중복"으로 판정해 드롭했으나, 사용자 명시 의도를 엔진이 임의 제거하면
+                    # 라벨·ㄴ 주석이 사라져 사용자 혼란. 여러 문장 중 일부만 라벨 누락되는 버그 원인.)
+                    # v2.1.4~: 타겟이 본문 라인 전체와 일치해도 타겟 유지.
+                    is_full = not tgt
                     key = "" if is_full else tgt
                     if key not in buckets:
                         buckets[key] = ("" if is_full else tgt, [])

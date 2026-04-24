@@ -50,12 +50,11 @@ def parse_annotation(annotation_text):
         fmt['font_size'] = min(VALID_FONT_SIZES, key=lambda x: abs(x - requested))
 
     # `'단어' 볼드` / `'단어' 밑줄` — 단어별 볼드/밑줄 추출 (v2.1.4~)
-    m = re.search(r"((?:'[^']+'\s*,?\s*)+)\s*(?:글꼴\s*두껍게|두껍게|볼드|bold)", text, re.IGNORECASE)
-    if m:
+    # 여러 그룹(`'A' 볼드, 'B' 볼드`)도 모두 수집하도록 finditer 사용
+    for m in re.finditer(r"((?:'[^']+'\s*,?\s*)+)\s*(?:글꼴\s*두껍게|두껍게|볼드|bold)", text, re.IGNORECASE):
         for w in re.findall(r"'([^']+)'", m.group(1)):
             fmt.setdefault('bolded_words', []).append(w)
-    m = re.search(r"((?:'[^']+'\s*,?\s*)+)\s*(?:밑줄|underline)", text, re.IGNORECASE)
-    if m:
+    for m in re.finditer(r"((?:'[^']+'\s*,?\s*)+)\s*(?:밑줄|underline)", text, re.IGNORECASE):
         for w in re.findall(r"'([^']+)'", m.group(1)):
             fmt.setdefault('underlined_words', []).append(w)
 
@@ -94,10 +93,9 @@ def parse_annotation(annotation_text):
     color_names = ['빨간색', '파란색', '청록색', '초록색', '보라색', '주황색', '회색', '하늘색', '노란색']
     for color_name in color_names:
         # 뒤에 "형광펜"이 붙으면 하이라이트 매칭 쪽으로 넘기기 (하늘색/노란색 중복 매칭 방지)
-        m = re.search(rf"((?:'[^']+'\s*,?\s*)+)\s*{color_name}(?!\s*형광펜)", text)
-        if m:
-            words = re.findall(r"'([^']+)'", m.group(1))
-            for w in words:
+        # 여러 단어 그룹(`'A' 빨간색, 'B' 빨간색`)도 모두 수집
+        for m in re.finditer(rf"((?:'[^']+'\s*,?\s*)+)\s*{color_name}(?!\s*형광펜)", text):
+            for w in re.findall(r"'([^']+)'", m.group(1)):
                 fmt['colored_words'].append((w, color_name))
 
     # 헥스 직접 지정: '빨간색(FF0000)', '파란색(0000FF)', '파란색(1155CC)' 등
@@ -145,10 +143,9 @@ def parse_annotation(annotation_text):
     # v2.1.4~: 먼저 `'단어' 색상 형광펜` 형태를 단어별 형광펜으로 추출.
     # 남은(단독 `ㄴ 색상 형광펜`) 지시는 fmt['highlight']로 문단 전체 적용.
     for hl_pattern, hl_val in highlight_map.items():
-        m = re.search(rf"((?:'[^']+'\s*,?\s*)+)\s*(?:{hl_pattern})색?\s*형광펜", text)
-        if m:
-            words = re.findall(r"'([^']+)'", m.group(1))
-            for w in words:
+        # 여러 단어 그룹(`'A' 노란 형광펜, 'B' 노란 형광펜`)도 모두 수집
+        for m in re.finditer(rf"((?:'[^']+'\s*,?\s*)+)\s*(?:{hl_pattern})색?\s*형광펜", text):
+            for w in re.findall(r"'([^']+)'", m.group(1)):
                 fmt.setdefault('highlighted_words', []).append((w, hl_val))
     for hl_pattern, hl_val in highlight_map.items():
         # 단어 추출 뒤에 남은 일반 형광펜 — 앞에 `'..'`가 없는 경우만
@@ -548,6 +545,8 @@ def _apply_formatting_to_para(para, original_text, fmt):
         original_text,
         fmt.get('colored_words', []),
         fmt.get('highlighted_words', []),
+        fmt.get('bolded_words', []),
+        fmt.get('underlined_words', []),
     )
     has_md_bold_spans = bool(re.search(r'\*\*[^*]+\*\*', original_text))
 
@@ -559,13 +558,16 @@ def _apply_formatting_to_para(para, original_text, fmt):
 
         # 볼드: 인용구·세그먼트 볼드·colored_words 범위는 그대로,
         # 그 외 fmt.bold는 ** 범위가 없을 때만 전체 적용.
+        # v2.1.4~: word_bold(단어별 볼드)가 있으면 해당 세그먼트만 볼드.
         if is_quote:
             run.bold = True
         elif seg_props.get('bold'):
             run.bold = True
+        elif seg_props.get('word_bold'):
+            run.bold = True
         elif fmt.get('bold') and seg_props.get('color'):
             run.bold = True
-        elif fmt.get('bold') and not fmt.get('colored_words') and not has_md_bold_spans:
+        elif fmt.get('bold') and not fmt.get('colored_words') and not fmt.get('bolded_words') and not has_md_bold_spans:
             run.bold = True
 
         if fmt.get('italic') or seg_props.get('italic'):
@@ -583,7 +585,10 @@ def _apply_formatting_to_para(para, original_text, fmt):
         )
         apply_visual = (not has_md_bold_spans) or seg_props.get('bold') or bool(has_explicit_visual)
 
-        if apply_visual and fmt.get('underline'):
+        # 밑줄: 세그먼트 word_underline 우선, 그 외 fmt.underline은 underlined_words 없고 apply_visual 일 때
+        if seg_props.get('word_underline'):
+            run.underline = True
+        elif apply_visual and fmt.get('underline') and not fmt.get('underlined_words'):
             run.underline = True
 
         if not is_quote and apply_visual:
@@ -876,6 +881,72 @@ def _normalize_line_lengths(text):
     return '\n'.join(result)
 
 
+def _lift_mid_paragraph_annotations(text):
+    """문단(빈 줄·★박스로 둘러싸인 연속 본문) 중간에 끼인 ㄴ 주석을 문단 끝으로 이동.
+
+    예) 입력:
+        문장A
+        ㄴ '단어' 파란색
+        문장B
+        문장C
+        ㄴ 빨간색
+    → 출력:
+        문장A
+        문장B
+        문장C
+        ㄴ '단어' 파란색
+        ㄴ 빨간색
+
+    이후 단계의 `_merged`가 ㄴ 블록을 한 줄로 병합 → parse_annotation 한 번에 모든 서식 취합.
+    같은 para에 서식이 2번 apply되어 첫 번째가 날아가던 문제 방지.
+    """
+    if not text:
+        return text
+    lines = text.split('\n')
+    out = []
+    in_box = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        s = line.strip()
+        # ★ 박스 진입·내부 그대로 유지
+        if '★' in s:
+            in_box = True
+            out.append(line)
+            i += 1
+            continue
+        if in_box:
+            out.append(line)
+            if _SEPARATOR_RE.match(s):
+                in_box = False
+            i += 1
+            continue
+        # 본문 라인이 시작되면 문단 수집 (빈 줄 또는 ★ 만나면 끝)
+        if s and not s.startswith('ㄴ'):
+            bodies = []
+            anns = []
+            j = i
+            while j < len(lines):
+                t = lines[j]
+                ts = t.strip()
+                if not ts:
+                    break
+                if '★' in ts:
+                    break
+                if ts.startswith('ㄴ'):
+                    anns.append(t)
+                else:
+                    bodies.append(t)
+                j += 1
+            out.extend(bodies)
+            out.extend(anns)
+            i = j
+        else:
+            out.append(line)
+            i += 1
+    return '\n'.join(out)
+
+
 # 여러 줄에 걸친 `**...**` 탐지 — DOTALL 필요 (. 가 \n 매치)
 _MULTILINE_BOLD_RE = re.compile(r'\*\*([^*]+?)\*\*', re.DOTALL)
 
@@ -949,6 +1020,8 @@ def _build_document(text, normalize=True):
     # - 레거시 em-dash 타겟은 output_parser._em_dash_to_quote 가 진입 시점에 변환.
     # - parse()에서는 `_merge_same_target_annotations` 호출 제거, 여기서만 한 번 실행.
     #   (편집창 사용자 수동 편집으로 생긴 중복 ㄴ 정리는 미리보기·다운로드 시점에만 필요.)
+    # v2.1.4~: 문단 중간 ㄴ 주석을 문단 끝으로 이동 (적용 대상 통합 + 같은 para 중복 apply 방지)
+    text = _lift_mid_paragraph_annotations(text)
     from output_parser import _merge_same_target_annotations
     text = _merge_same_target_annotations(text)
 
@@ -1073,23 +1146,22 @@ def _build_document(text, normalize=True):
                 + list(fmt.get('target_words', []))
             )
 
-            # content_group 수집: 연속 ㄴ 건너뛰고 본문 블록 수집 → 빈 줄·다음 ㄴ 만나면 중단
+            # content_group 수집: 현재 ㄴ 위의 "본문 문단" 수집.
+            # v2.1.4~: 중간 ㄴ 주석은 경계 아닌 "단어 서식일 뿐"으로 취급 → 건너뛰고 위 본문까지 계속.
+            # 문단 경계는 **빈 줄**만으로 판정.
             content_group = []
-            started = False
             for p_r, t_r in reversed(recent):
                 t_s = (t_r or '').strip()
                 is_ann = bool(re.match(r'^ㄴ\s*', t_s) and _is_format_annotation(t_s))
-                if not started:
-                    # 현재 ㄴ 직전의 연속 ㄴ 또는 빈 줄 skip, 첫 본문 만나면 수집 시작
-                    if is_ann or not t_s:
-                        continue
-                    started = True
-                    content_group.append((p_r, t_r))
-                else:
-                    # 수집 중: 빈 줄 또는 다른 ㄴ 만나면 중단
-                    if not t_s or is_ann:
+                if not t_s:
+                    # 빈 줄: 수집 시작 전이면 skip, 이미 수집 중이면 중단 (문단 경계)
+                    if content_group:
                         break
-                    content_group.append((p_r, t_r))
+                    continue
+                if is_ann:
+                    # ㄴ 주석: 경계 아닌 단어 서식일 뿐. 건너뛰고 위 본문 계속 수집.
+                    continue
+                content_group.append((p_r, t_r))
             content_group.reverse()
 
             if target_count > 1:
@@ -1137,6 +1209,29 @@ def _build_document(text, normalize=True):
                         _apply_formatting_to_para(para, para_text, para_fmt)
                     else:
                         _apply_formatting_to_para(para, para_text, fmt)
+
+                # v2.1.4~: 단어 타겟이 있어도 문단 전체 서식(full_text_color/highlight/underline)이
+                # 함께 있으면 content_group의 비타겟 라인에도 문단 전체 서식만 별도 적용.
+                # 예) `ㄴ '치' 파란색, 빨간색` → 매칭 라인은 치=파랑+나머지=빨강, 비매칭 라인은 전체 빨강.
+                has_para_only_fmt = (
+                    fmt.get('full_text_color')
+                    or fmt.get('full_text_color_hex')
+                    or fmt.get('highlight')
+                    or fmt.get('underline')
+                    or fmt.get('bold')
+                )
+                if search_words and has_para_only_fmt and content_group:
+                    target_ids = {id(p) for p, _ in targets}
+                    for para, para_text in content_group:
+                        if id(para) in target_ids:
+                            continue
+                        bare_fmt = dict(fmt)
+                        bare_fmt['colored_words'] = []
+                        bare_fmt['highlighted_words'] = []
+                        bare_fmt['bolded_words'] = []
+                        bare_fmt['underlined_words'] = []
+                        bare_fmt['target_words'] = []
+                        _apply_formatting_to_para(para, para_text, bare_fmt)
 
             # ㄴ 줄 자체 → 초록색 주석 (헥스괄호 제거, 링크는 단독 치환)
             display = _annotation_display_text(stripped)
