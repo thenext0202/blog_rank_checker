@@ -1,6 +1,6 @@
 """
 🏢 꼭지네 마케팅 인하우스 AI 팀
-CEO: 이꼭지 (사용자) / 팀장: 하늘 (AI 관리자)
+CEO: 치답이 (사용자) / 팀장: 하늘 (AI 관리자)
 터미널에서 실행: python main.py
 """
 import sys
@@ -31,7 +31,7 @@ def print_banner():
 ║           🏢 꼭지네 마케팅 인하우스             ║
 ║               Core 7 AI Team                    ║
 ╠══════════════════════════════════════════════════╣
-║  👑 이꼭지 (CEO)        — 그건 바로 나!         ║
+║  👑 치답이 (CEO)        — 그건 바로 나!         ║
 ║  📋 하늘 (팀장)         — 업무 배정/품질 관리   ║
 ║  🔍 사루비아 (SEO 전략가)   — 키워드/검색 최적화   ║
 ║  ✍️  지수 (콘텐츠 마케터) — 블로그/카피 작성     ║
@@ -86,14 +86,14 @@ def main():
                 agent = AGENTS[direct_mode]
                 prompt_text = f"{agent['emoji']} {agent['name']}"
         else:
-            prompt_text = "👑 이꼭지 CEO"
+            prompt_text = "👑 치답이 CEO"
 
         try:
             user_input = input(f"\n{C.BOLD}{C.GREEN}{prompt_text} > {C.END}").strip()
         except (KeyboardInterrupt, EOFError):
             company.save()
             print(f"\n{C.GREEN}💾 대화 이력 저장 완료{C.END}")
-            print(f"{C.CYAN}👋 수고하셨습니다, 이꼭지 CEO님!{C.END}")
+            print(f"{C.CYAN}👋 수고하셨습니다, 치답이 CEO님!{C.END}")
             break
 
         if not user_input:
@@ -103,12 +103,12 @@ def main():
         if user_input == "/종료":
             company.save()
             print(f"{C.GREEN}💾 대화 이력 저장 완료{C.END}")
-            print(f"{C.CYAN}👋 수고하셨습니다, 이꼭지 CEO님!{C.END}")
+            print(f"{C.CYAN}👋 수고하셨습니다, 치답이 CEO님!{C.END}")
             break
 
         elif user_input == "/팀":
             print(f"\n{C.BOLD}📋 직원 현황:{C.END}")
-            print(f"  👑 이꼭지 (CEO) — 나!")
+            print(f"  👑 치답이 (CEO) — 나!")
             for aid, agent in AGENTS.items():
                 print(f"  {agent['emoji']} {agent['name']}")
             direct_mode = None

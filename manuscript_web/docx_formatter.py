@@ -33,10 +33,12 @@ def parse_annotation(annotation_text):
         fmt['is_image_desc'] = True
         return fmt
 
-    # 인용구 N번
+    # 인용구 N번 — 글자 크기 미지정 시 기본 19pt 주입 (LLM이 종종 누락)
     m = re.search(r'인용구\s*(\d+)\s*번', text)
     if m:
         fmt['quote'] = int(m.group(1))
+        if fmt['font_size'] is None:
+            fmt['font_size'] = 19
 
     # 글자 크기 (유효 크기만 허용) — '글자 크기 N' 또는 'Npt' 표기 수용
     VALID_FONT_SIZES = [11, 12, 13, 15, 16, 19, 24, 28]
@@ -47,13 +49,29 @@ def parse_annotation(annotation_text):
         requested = int(m.group(1))
         fmt['font_size'] = min(VALID_FONT_SIZES, key=lambda x: abs(x - requested))
 
-    # 볼드 — '글꼴 두껍게' / '두껍게' / '볼드' / 'bold'
-    if re.search(r'글꼴\s*두껍게|두껍게|볼드|bold', text, re.IGNORECASE):
-        fmt['bold'] = True
+    # `'단어' 볼드` / `'단어' 밑줄` — 단어별 볼드/밑줄 추출 (v2.1.4~)
+    m = re.search(r"((?:'[^']+'\s*,?\s*)+)\s*(?:글꼴\s*두껍게|두껍게|볼드|bold)", text, re.IGNORECASE)
+    if m:
+        for w in re.findall(r"'([^']+)'", m.group(1)):
+            fmt.setdefault('bolded_words', []).append(w)
+    m = re.search(r"((?:'[^']+'\s*,?\s*)+)\s*(?:밑줄|underline)", text, re.IGNORECASE)
+    if m:
+        for w in re.findall(r"'([^']+)'", m.group(1)):
+            fmt.setdefault('underlined_words', []).append(w)
 
-    # 밑줄 — '밑줄' / 'underline'
-    if re.search(r'밑줄|underline', text, re.IGNORECASE):
-        fmt['underline'] = True
+    # 볼드 — '글꼴 두껍게' / '두껍게' / '볼드' / 'bold' (앞에 '단어' 없는 경우만 문단 전체)
+    _bold_m = re.search(r"(?<!['\"])\s*(글꼴\s*두껍게|두껍게|볼드|bold)", text, re.IGNORECASE)
+    if _bold_m:
+        _before = text[:_bold_m.start()].rstrip()
+        if not re.search(r"""['\"][^'\"]+['\"]\s*,?\s*$""", _before):
+            fmt['bold'] = True
+
+    # 밑줄 — 동일 패턴
+    _under_m = re.search(r"(?<!['\"])\s*(밑줄|underline)", text, re.IGNORECASE)
+    if _under_m:
+        _before = text[:_under_m.start()].rstrip()
+        if not re.search(r"""['\"][^'\"]+['\"]\s*,?\s*$""", _before):
+            fmt['underline'] = True
 
     # 이탤릭 / 기울임
     if re.search(r'이탤릭|기울임|글꼴\s*기울임', text):
@@ -72,9 +90,11 @@ def parse_annotation(annotation_text):
             break
 
     # 색상 키워드: '단어' 빨간색 형태 ('단어1', '단어2' 파란색 도 지원)
-    color_names = ['빨간색', '파란색', '청록색', '초록색', '보라색', '주황색', '회색']
+    # 하늘색·노란색은 본래 형광펜 색으로만 쓰이지만 v2.1~ 표준 통일로 동일 형식 지원
+    color_names = ['빨간색', '파란색', '청록색', '초록색', '보라색', '주황색', '회색', '하늘색', '노란색']
     for color_name in color_names:
-        m = re.search(rf"((?:'[^']+'\s*,?\s*)+)\s*{color_name}", text)
+        # 뒤에 "형광펜"이 붙으면 하이라이트 매칭 쪽으로 넘기기 (하늘색/노란색 중복 매칭 방지)
+        m = re.search(rf"((?:'[^']+'\s*,?\s*)+)\s*{color_name}(?!\s*형광펜)", text)
         if m:
             words = re.findall(r"'([^']+)'", m.group(1))
             for w in words:
@@ -87,17 +107,21 @@ def parse_annotation(annotation_text):
     if m:
         fmt['full_text_color_hex'] = m.group(2).upper()
 
-    # 따옴표 없는 색상명 단독 표기 → 전체 글자색 (헥스/colored_words/full_text_color가 없을 때만)
+    # 따옴표 없는 색상명 단독 표기 → 전체 글자색
     # 예: 'ㄴ 파란색, 볼드' → full_text_color = 파란색
-    # 가드: 색상명 앞에 '형광펜' 수식 또는 색상명 앞 글자가 '색'이면 (진한 회색 등) 이미 처리됨
-    if (not fmt['full_text_color_hex']
-            and not fmt['colored_words']
-            and not fmt['full_text_color']):
+    # 예: 'ㄴ 빨간색, \'단어\' 파란색' → full_text_color = 빨간색 + colored_words = [(단어, 파란색)]
+    #   (두 ㄴ 주석이 _merged로 합쳐진 경우 전체 색상 + 특정 단어 색상이 공존)
+    # 가드:
+    #   - 색상명 바로 앞에 '단어' 형식이 있으면 colored_words 용이므로 skip
+    #   - 뒤에 '형광펜'이 오면 하이라이트 용이므로 skip
+    if not fmt['full_text_color_hex'] and not fmt['full_text_color']:
         for cn in ['빨간색', '파란색', '청록색', '초록색', '보라색', '주황색', '회색', '하늘색', '노란색']:
-            # 앞뒤 경계: 앞에 따옴표/글자가 아니고, 뒤에 ( , 공백(다른 단어) 또는 줄끝
             m2 = re.search(rf"(?<![\'가-힣]){re.escape(cn)}(?=[\s,()]|$)", text)
             if m2:
-                # '형광펜' 용법과 충돌 방지 — 색상명 바로 뒤가 형광펜이면 skip
+                before = text[:m2.start()].rstrip()
+                # 바로 앞이 `'단어'` 또는 `"단어"` 로 끝나면 colored_words 용 → skip
+                if re.search(r"""['\"][^'\"]+['\"]\s*$""", before):
+                    continue
                 tail = text[m2.end():].strip()
                 if tail.startswith('형광펜'):
                     continue
@@ -118,8 +142,22 @@ def parse_annotation(annotation_text):
         '초록': WD_COLOR_INDEX.GREEN,
         '청록': WD_COLOR_INDEX.TEAL,
     }
+    # v2.1.4~: 먼저 `'단어' 색상 형광펜` 형태를 단어별 형광펜으로 추출.
+    # 남은(단독 `ㄴ 색상 형광펜`) 지시는 fmt['highlight']로 문단 전체 적용.
     for hl_pattern, hl_val in highlight_map.items():
-        if re.search(rf'(?:{hl_pattern})색?\s*형광펜', text):
+        m = re.search(rf"((?:'[^']+'\s*,?\s*)+)\s*(?:{hl_pattern})색?\s*형광펜", text)
+        if m:
+            words = re.findall(r"'([^']+)'", m.group(1))
+            for w in words:
+                fmt.setdefault('highlighted_words', []).append((w, hl_val))
+    for hl_pattern, hl_val in highlight_map.items():
+        # 단어 추출 뒤에 남은 일반 형광펜 — 앞에 `'..'`가 없는 경우만
+        m2 = re.search(rf"(?<!['\"])(?:{hl_pattern})색?\s*형광펜", text)
+        if m2:
+            # 이 매치 바로 앞에 `'단어'` 가 붙어 있으면 이미 highlighted_words로 잡힌 것 → skip
+            before = text[:m2.start()].rstrip()
+            if re.search(r"""['\"][^'\"]+['\"]\s*$""", before):
+                continue
             fmt['highlight'] = hl_val
             break
 
@@ -293,8 +331,9 @@ def _split_colored_words_across_targets(targets, colored_words):
 # ║  Word 출력 (.docx)                                           ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-def _build_styled_segments(original_text, colored_words):
-    """텍스트를 마크다운 볼드/이탤릭 + 색상 키워드 기준으로 세그먼트 분할"""
+def _build_styled_segments(original_text, colored_words, highlighted_words=None,
+                           bolded_words=None, underlined_words=None):
+    """텍스트를 마크다운 볼드/이탤릭 + 단어별 색상/형광펜/볼드/밑줄 기준으로 세그먼트 분할"""
     md_re = re.compile(r'\*\*\*(.+?)\*\*\*|\*\*(.+?)\*\*|\*(.+?)\*')
 
     chunks = []  # (text, is_bold, is_italic)
@@ -302,18 +341,22 @@ def _build_styled_segments(original_text, colored_words):
     for m in md_re.finditer(original_text):
         if m.start() > last:
             chunks.append((original_text[last:m.start()], False, False))
-        if m.group(1):       # ***bold italic***
+        if m.group(1):
             chunks.append((m.group(1), True, True))
-        elif m.group(2):     # **bold**
+        elif m.group(2):
             chunks.append((m.group(2), True, False))
-        elif m.group(3):     # *italic*
+        elif m.group(3):
             chunks.append((m.group(3), False, True))
         last = m.end()
     if last < len(original_text):
         chunks.append((original_text[last:], False, False))
 
-    if not colored_words:
-        return [(t, {'bold': b, 'italic': it, 'color': None})
+    highlighted_words = highlighted_words or []
+    bolded_words = bolded_words or []
+    underlined_words = underlined_words or []
+    if not colored_words and not highlighted_words and not bolded_words and not underlined_words:
+        return [(t, {'bold': b, 'italic': it, 'color': None, 'highlight': None,
+                     'word_bold': False, 'word_underline': False})
                 for t, b, it in chunks]
 
     visible_text = ''.join(c[0] for c in chunks)
@@ -322,17 +365,43 @@ def _build_styled_segments(original_text, colored_words):
         for m in re.finditer(re.escape(word), visible_text):
             for j in range(m.start(), m.end()):
                 char_colors[j] = color_name
+    char_highlights = [None] * len(visible_text)
+    for word, hl_val in highlighted_words:
+        for m in re.finditer(re.escape(word), visible_text):
+            for j in range(m.start(), m.end()):
+                char_highlights[j] = hl_val
+    char_bold = [False] * len(visible_text)
+    for word in bolded_words:
+        for m in re.finditer(re.escape(word), visible_text):
+            for j in range(m.start(), m.end()):
+                char_bold[j] = True
+    char_underline = [False] * len(visible_text)
+    for word in underlined_words:
+        for m in re.finditer(re.escape(word), visible_text):
+            for j in range(m.start(), m.end()):
+                char_underline[j] = True
 
     segments = []
     pos = 0
     for chunk_text, is_bold, is_italic in chunks:
         i = 0
         while i < len(chunk_text):
-            current_color = char_colors[pos + i]
+            cur_color = char_colors[pos + i]
+            cur_hl = char_highlights[pos + i]
+            cur_wb = char_bold[pos + i]
+            cur_wu = char_underline[pos + i]
             j = i
-            while j < len(chunk_text) and char_colors[pos + j] == current_color:
+            while (j < len(chunk_text)
+                   and char_colors[pos + j] == cur_color
+                   and char_highlights[pos + j] == cur_hl
+                   and char_bold[pos + j] == cur_wb
+                   and char_underline[pos + j] == cur_wu):
                 j += 1
-            segments.append((chunk_text[i:j], {'bold': is_bold, 'italic': is_italic, 'color': current_color}))
+            segments.append((chunk_text[i:j], {
+                'bold': is_bold, 'italic': is_italic,
+                'color': cur_color, 'highlight': cur_hl,
+                'word_bold': cur_wb, 'word_underline': cur_wu,
+            }))
             i = j
         pos += len(chunk_text)
 
@@ -475,7 +544,11 @@ def _apply_formatting_to_para(para, original_text, fmt):
         return
 
     _clear_paragraph_runs(para)
-    segments = _build_styled_segments(original_text, fmt.get('colored_words', []))
+    segments = _build_styled_segments(
+        original_text,
+        fmt.get('colored_words', []),
+        fmt.get('highlighted_words', []),
+    )
     has_md_bold_spans = bool(re.search(r'\*\*[^*]+\*\*', original_text))
 
     for seg_text, seg_props in segments:
@@ -499,7 +572,16 @@ def _apply_formatting_to_para(para, original_text, fmt):
             run.italic = True
 
         # 시각 서식(색/형광펜/밑줄) 적용 범위 결정
-        apply_visual = (not has_md_bold_spans) or seg_props.get('bold')
+        # v2.1.4~: 명시적 visual 지시(색/형광펜/밑줄/세그먼트 색)는 **..** 범위 무관 항상 적용.
+        has_explicit_visual = (
+            seg_props.get('color')
+            or seg_props.get('highlight')
+            or fmt.get('full_text_color')
+            or fmt.get('full_text_color_hex')
+            or fmt.get('highlight')
+            or fmt.get('underline')
+        )
+        apply_visual = (not has_md_bold_spans) or seg_props.get('bold') or bool(has_explicit_visual)
 
         if apply_visual and fmt.get('underline'):
             run.underline = True
@@ -521,9 +603,14 @@ def _apply_formatting_to_para(para, original_text, fmt):
                     run.font.color.rgb = _color_map[ftc]
                     has_any_color = True
             # 검정 형광펜 + 글자색 미지정 → 자동 흰 글자 (가독성 보정)
-            if fmt.get('highlight') == WD_COLOR_INDEX.BLACK and not has_any_color:
+            seg_hl = seg_props.get('highlight')
+            eff_hl = seg_hl if seg_hl is not None else fmt.get('highlight')
+            if eff_hl == WD_COLOR_INDEX.BLACK and not has_any_color:
                 run.font.color.rgb = WHITE_C
-            if fmt.get('highlight'):
+            # 세그먼트별 형광펜 우선, 없으면 문단 전체 형광펜
+            if seg_hl is not None:
+                run.font.highlight_color = seg_hl
+            elif fmt.get('highlight'):
                 run.font.highlight_color = fmt['highlight']
 
     if fmt.get('link'):
@@ -789,8 +876,50 @@ def _normalize_line_lengths(text):
     return '\n'.join(result)
 
 
+# 여러 줄에 걸친 `**...**` 탐지 — DOTALL 필요 (. 가 \n 매치)
+_MULTILINE_BOLD_RE = re.compile(r'\*\*([^*]+?)\*\*', re.DOTALL)
+
+
+def _rewrap_multiline_bold(text):
+    """줄 길이 정규화로 `**A\\nB\\nC**` 형태가 된 볼드를 각 줄 개별 래핑으로 복구.
+
+    워드·HTML 렌더러는 줄 단위로 `**...**` 쌍을 찾기 때문에, 여는 `**`는 첫 줄에
+    닫는 `**`는 마지막 줄에만 있으면 엔진이 짝을 못 찾고 `*` 기호가 그대로 출력됨.
+    → `**A**\\n**B**\\n**C**` 로 재래핑해 각 줄이 독립적으로 볼드 처리되게 만듦.
+    ㄴ 지시 줄과 빈 줄은 래핑 대상에서 제외.
+    """
+    if not text or '**' not in text:
+        return text
+
+    def _repl(m):
+        inner = m.group(1)
+        if '\n' not in inner:
+            return m.group(0)
+        out = []
+        for ln in inner.split('\n'):
+            s = ln.strip()
+            if not s:
+                out.append(ln)
+            elif s.startswith('ㄴ'):
+                out.append(ln)
+            else:
+                leading = ln[:len(ln) - len(ln.lstrip())]
+                trailing = ln[len(ln.rstrip()):]
+                out.append(f'{leading}**{ln.strip()}**{trailing}')
+        return '\n'.join(out)
+
+    return _MULTILINE_BOLD_RE.sub(_repl, text)
+
+
 # ── _build_document: 텍스트 → docx.Document 객체 (서식 적용) ──
-def _build_document(text):
+def _build_document(text, normalize=True):
+    """텍스트 → docx 문서.
+
+    normalize=True: 줄 길이 정규화를 적용 (워드 다운로드 기본 동작 유지).
+    normalize=False: 편집창에서 내려준 본문을 1:1 그대로 렌더링 — 미리보기/사용자가
+    수동으로 쪼갠 줄바꿈을 존중하기 위함. 사용자는 /generate 시점에 이미 정규화된
+    본문을 받으므로 이후 편집창 내용은 절대 진실로 취급.
+    """
     from docx import Document
     from docx.shared import Pt, RGBColor, Cm, Inches
     from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
@@ -808,7 +937,20 @@ def _build_document(text):
     BLUE = RGBColor(0x00, 0x70, 0xC0)
 
     # 줄 길이 정규화 (10~28자 타겟) — 기존 파싱 전 전처리
-    text = _normalize_line_lengths(text)
+    if normalize:
+        text = _normalize_line_lengths(text)
+    # 여러 줄에 걸친 `**...**` 복구 — 줄 쪼개기가 여는/닫는 쌍을 토막 낸 경우
+    # 엔진이 `*` 을 리터럴로 출력하는 것을 막기 위해 각 줄 개별 래핑으로 변환.
+    # normalize=False (미리보기/다운로드) 경로에서도 편집창 body에 이미 split된
+    # `**A\\nB\\nC**` 가 들어있을 수 있으므로 normalize와 무관하게 항상 실행.
+    text = _rewrap_multiline_bold(text)
+    # v2.1~ 변경:
+    # - `_normalize_highlight_ann_targets` 호출/함수 삭제 — color_names에 하늘/노란 추가 후 불필요.
+    # - 레거시 em-dash 타겟은 output_parser._em_dash_to_quote 가 진입 시점에 변환.
+    # - parse()에서는 `_merge_same_target_annotations` 호출 제거, 여기서만 한 번 실행.
+    #   (편집창 사용자 수동 편집으로 생긴 중복 ㄴ 정리는 미리보기·다운로드 시점에만 필요.)
+    from output_parser import _merge_same_target_annotations
+    text = _merge_same_target_annotations(text)
 
     lines = text.split('\n')
     # 연속된 ㄴ 서식 라인 병합 — 같은 단락에 두 번 apply되면 _clear_paragraph_runs가
@@ -921,59 +1063,69 @@ def _build_document(text):
             # 블록 안에 `**..**` 단락이 하나라도 있으면 **볼드가 있는 단락만** 타겟(볼드 없는 일반 문장은 스킵).
             # 없으면 블록 마지막 한 단락만 타겟.
             # 이 로직은 사용자가 '두 줄 모두' 등 multi_line을 명시하지 않고 colored_words도 없을 때만 동작.
-            if target_count == 1 and not fmt.get('colored_words') and not fmt.get('target_words'):
-                block = []
-                for p_r, t_r in reversed(recent):
-                    t_s = t_r.strip() if t_r else ''
-                    if not t_s:
-                        break
-                    if re.match(r'^ㄴ\s*', t_s) and _is_format_annotation(t_s):
-                        break
-                    block.append((p_r, t_r))
-                block.reverse()
-
-                if block:
-                    bold_paras = [(p, t) for p, t in block
-                                  if re.search(r'\*\*[^*]+\*\*', t.strip())]
-                    if bold_paras:
-                        targets = bold_paras
-                    else:
-                        # 블록 안에 **..** 볼드 범위가 없으면 블록 전체에 적용
-                        targets = block
-                else:
-                    targets = []
-            else:
-                targets = content_paras[-target_count:] if content_paras else []
-
-            applied = False
-            # colored_words / target_words 모두 "단어 기반" 타겟팅이라 fallback 로직 공유
+            # v2.1~ 타겟 산정 로직:
+            # - 먼저 "연속 ㄴ 주석들을 건너뛰고 그 위 본문 그룹"을 수집 (content_group).
+            # - search_words 있음: 그 그룹 안에서 각 단어의 첫 매칭 라인만 타겟.
+            #   못 찾은 단어는 조용히 스킵 (fallback 없음).
+            # - search_words 없음 (타겟 미지정): 그룹 안 **..** 볼드 단락만, 없으면 그룹 마지막 1줄만.
             search_words = (
                 [w for w, _ in fmt.get('colored_words', [])]
                 + list(fmt.get('target_words', []))
             )
+
+            # content_group 수집: 연속 ㄴ 건너뛰고 본문 블록 수집 → 빈 줄·다음 ㄴ 만나면 중단
+            content_group = []
+            started = False
+            for p_r, t_r in reversed(recent):
+                t_s = (t_r or '').strip()
+                is_ann = bool(re.match(r'^ㄴ\s*', t_s) and _is_format_annotation(t_s))
+                if not started:
+                    # 현재 ㄴ 직전의 연속 ㄴ 또는 빈 줄 skip, 첫 본문 만나면 수집 시작
+                    if is_ann or not t_s:
+                        continue
+                    started = True
+                    content_group.append((p_r, t_r))
+                else:
+                    # 수집 중: 빈 줄 또는 다른 ㄴ 만나면 중단
+                    if not t_s or is_ann:
+                        break
+                    content_group.append((p_r, t_r))
+            content_group.reverse()
+
+            if target_count > 1:
+                # multi_line 명시 (예: "두 줄 모두") — content_paras 기준 뒤에서 N줄
+                targets = content_paras[-target_count:] if content_paras else []
+            elif search_words:
+                # 각 단어별로 content_group 안에서 매칭 라인 찾기
+                matched = []
+                seen_ids = set()
+                for word in search_words:
+                    for p_r, t_r in content_group:
+                        clean = re.sub(r'\*+', '', t_r)
+                        if word in clean:
+                            if id(p_r) not in seen_ids:
+                                matched.append((p_r, t_r))
+                                seen_ids.add(id(p_r))
+                            break
+                targets = matched
+            else:
+                # 타겟 단어 미지정 ㄴ 주석 — 블록 전체 적용.
+                # 편집창 JS가 여러 줄 선택 시 블록 위 빈 줄을 자동 삽입해 경계 확보하므로
+                # 윗 문단 흡수는 발생하지 않음. **..** 명시 범위가 있으면 그것만 우선.
+                if content_group:
+                    bold_paras = [(p, t) for p, t in content_group
+                                  if re.search(r'\*\*[^*]+\*\*', t.strip())]
+                    targets = bold_paras if bold_paras else content_group
+                else:
+                    targets = []
+
+            applied = False
             if search_words:
                 if targets:
-                    all_target_text = ' '.join(t for _, t in targets)
-                    missing = any(w not in all_target_text for w in search_words)
-                    if missing and len(content_paras) > target_count:
-                        found = False
-                        for ext in range(target_count + 1, min(target_count + 8, len(content_paras) + 1)):
-                            targets = content_paras[-ext:]
-                            all_target_text = ' '.join(t for _, t in targets)
-                            if all(w in all_target_text for w in search_words):
-                                found = True
-                                break
-                        if found:
-                            applied = True
-                        else:
-                            pending_fmts.append((fmt, []))
-                    elif not missing:
-                        applied = True
-                    else:
-                        pending_fmts.append((fmt, []))
-                else:
-                    pending_fmts.append((fmt, []))
+                    applied = True
+                # else: 매칭된 단어가 하나도 없음 → 스킵 (fallback 없음)
             else:
+                # 타겟 단어 미지정 ㄴ 주석 (예: ㄴ 파란색 단독)은 targets에 적용
                 applied = True
 
             if applied:
@@ -1071,11 +1223,15 @@ def save_as_docx(text, filepath):
     _build_document(text).save(filepath)
 
 
-def build_docx_bytes_from_text(text):
-    """텍스트 → 서식 적용된 .docx bytes (메모리 반환)."""
+def build_docx_bytes_from_text(text, normalize=False):
+    """텍스트 → 서식 적용된 .docx bytes (메모리 반환).
+
+    기본 normalize=False: 편집창 = 최종본이라는 전제. 사용자가 수동으로 쪼갠
+    줄바꿈을 그대로 보존. /generate 단계에서 이미 normalize_text로 한 번 처리했음.
+    """
     from io import BytesIO
     buf = BytesIO()
-    _build_document(text).save(buf)
+    _build_document(text, normalize=normalize).save(buf)
     return buf.getvalue()
 
 
@@ -1084,5 +1240,10 @@ def normalize_text(text):
 
     /generate 응답에서 호출. 사용자가 편집창에서 보는 줄바꿈과
     미리보기 줄바꿈이 같아야 어디를 고쳐야 할지 가늠 가능.
+    줄 쪼개기로 인해 `**...**` 가 토막 난 경우도 여기서 같이 복구.
     """
-    return _normalize_line_lengths(text or '')
+    if not text:
+        return ''
+    t = _normalize_line_lengths(text)
+    t = _rewrap_multiline_bold(t)
+    return t

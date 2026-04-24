@@ -91,7 +91,7 @@ ROOMS_REL = [
     {"rx": 945/1100, "ry": 20/440,  "rw": 140/1100, "rh": 140/440, "label": "데이지 개인실", "type": "personal"},
     {"rx": 15/1100,  "ry": 200/440, "rw": 320/1100, "rh": 210/440, "label": "회의실",        "type": "meeting"},
     {"rx": 355/1100, "ry": 200/440, "rw": 320/1100, "rh": 210/440, "label": "프로젝트실",    "type": "project"},
-    {"rx": 695/1100, "ry": 200/440, "rw": 390/1100, "rh": 210/440, "label": "CEO 이꼭지",    "type": "ceo"},
+    {"rx": 695/1100, "ry": 200/440, "rw": 390/1100, "rh": 210/440, "label": "CEO 치답이",    "type": "ceo"},
 ]
 
 # 직원 홈 위치 (비율 — 각 방 중앙)
@@ -337,10 +337,14 @@ class OfficeGUI:
                 capture = True
                 continue
             if capture:
-                if line.startswith("##"):
+                # "## X만의 규칙" 같은 동급 헤더에서 중단 (### 서브헤더는 유지)
+                if line.startswith("## ") and "전문 분야" not in line and "핵심 규정" not in line:
                     break
                 s = line.strip()
-                if s.startswith("-"):
+                if s.startswith("### "):
+                    # 서브헤더를 스킬 카테고리로 추가
+                    skills.append(s[4:].strip())
+                elif s.startswith("-"):
                     skills.append(s[2:].strip())
                 elif s and s[0].isdigit():
                     skills.append(s)
@@ -481,9 +485,16 @@ class OfficeGUI:
     # ── 중단 ─────────────────────────────
 
     def _cancel(self):
-        """작업 중단"""
+        """작업 즉시 중단"""
         self.cancel = True
-        self.log.append(("sys", "중단 요청! 현재 진행 중인 작업이 끝나면 멈춥니다."))
+        self.busy = False
+        self.log.append(("sys", "중단되었습니다."))
+        # 큐 비우기
+        while not self.eq.empty():
+            try:
+                self.eq.get_nowait()
+            except queue.Empty:
+                break
         # 모든 직원 즉시 복귀
         for ag in self.agents.values():
             if ag["status"] not in ("idle",):
@@ -537,9 +548,9 @@ class OfficeGUI:
 
         # 채팅에 표시
         if self.direct:
-            self.log.append(("ceo", f"이꼭지 → {SHORT[self.direct]}: {text}"))
+            self.log.append(("ceo", f"치답이 → {SHORT[self.direct]}: {text}"))
         else:
-            self.log.append(("ceo", f"이꼭지: {text}"))
+            self.log.append(("ceo", f"치답이: {text}"))
 
         self.busy = True
         self.cancel = False
@@ -746,17 +757,23 @@ class OfficeGUI:
             clr = COLORS[aid]
             st = ag["status"]
 
-            # 작업 중 후광
+            # 작업 중 후광 + 테두리 강조
             if st == "working":
-                # 깜빡이는 효과
-                alpha = 40 + int(20 * abs((pygame.time.get_ticks() % 1000) / 500 - 1))
-                glow = pygame.Surface((70, 70), pygame.SRCALPHA)
-                pygame.draw.circle(glow, (*clr, alpha), (35, 35), 35)
-                self.screen.blit(glow, (x - 35, y - 35))
+                # 큰 후광 (깜빡임)
+                pulse = abs((pygame.time.get_ticks() % 1200) / 600 - 1)
+                alpha = 50 + int(40 * pulse)
+                glow = pygame.Surface((80, 80), pygame.SRCALPHA)
+                pygame.draw.circle(glow, (*clr, alpha), (40, 40), 40)
+                self.screen.blit(glow, (x - 40, y - 40))
 
             # 몸통
             pygame.draw.circle(self.screen, clr, (x, y), 22)
-            pygame.draw.circle(self.screen, C.WHITE, (x, y), 22, 2)
+            # 테두리: 작업 중이면 주황 굵게, 아니면 흰색
+            if st in ("working", "moving"):
+                border_clr = C.ORANGE if st == "working" else C.YELLOW
+                pygame.draw.circle(self.screen, border_clr, (x, y), 23, 3)
+            else:
+                pygame.draw.circle(self.screen, C.WHITE, (x, y), 22, 2)
 
             # 이름 (원 안)
             ns = self.f12.render(SHORT[aid], True, C.WHITE)
@@ -766,15 +783,17 @@ class OfficeGUI:
             rs = self.f12.render(ROLE[aid], True, clr)
             self.screen.blit(rs, (x - rs.get_width() // 2, y + 25))
 
-            # 상태 표시등
+            # 상태 표시등 (크게)
             sc = {"idle": C.GREEN, "moving": C.YELLOW, "working": C.ORANGE,
                   "searching": C.BLUE, "returning": C.YELLOW}.get(st, C.GREEN)
-            pygame.draw.circle(self.screen, sc, (x + 16, y - 16), 5)
-            pygame.draw.circle(self.screen, C.WHITE, (x + 16, y - 16), 5, 1)
+            pygame.draw.circle(self.screen, sc, (x + 18, y - 18), 7)
+            pygame.draw.circle(self.screen, C.WHITE, (x + 18, y - 18), 7, 1)
 
             # 말풍선 (현재 하는 일 표시)
             bubble = ag.get("bubble", "")
-            if bubble:
+            if not bubble and st == "working":
+                bubble = "작업 중..."
+            if bubble and st != "idle":
                 # 말풍선 배경
                 btxt = self.f12.render(bubble, True, C.TEXT)
                 bw = btxt.get_width() + 16
@@ -932,7 +951,11 @@ class OfficeGUI:
         ov.fill((0, 0, 0, 160))
         self.screen.blit(ov, (0, 0))
 
-        pw, ph = 480, 380
+        pw = 480
+        # 스킬 수에 따라 높이 동적 계산 (헤더55 + 제목28 + 스킬*22 + 버튼영역70 + 여백30)
+        num_skills = len(self.popup.get("skills", []))
+        ph = max(280, 55 + 28 + num_skills * 22 + 70 + 30)
+        ph = min(ph, self.H - 40)  # 화면 넘침 방지
         px = (self.W - pw) // 2
         py = (self.H - ph) // 2
         aid = self.popup["agent_id"]

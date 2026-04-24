@@ -90,6 +90,209 @@ def index():
     )
 
 
+@app.route("/test", methods=["GET"])
+def test_page():
+    # 편집창 서식 로직 자동 검증 페이지. 실제 index.html을 iframe으로 띄워
+    # 샘플 원고·선택 범위·버튼 클릭을 자동으로 재현하고 결과를 비교한다.
+    return render_template("test_format.html", version=config.VERSION)
+
+
+@app.route("/test_preview", methods=["POST"])
+def test_preview():
+    """테스트 페이지 전용 미리보기 프록시 (인증 없음, localhost 개발용)."""
+    from html_formatter import build_html_preview
+    data = request.get_json(silent=True) or {}
+    title = data.get("title", "") or ""
+    body = data.get("body", "") or ""
+    if not body.strip():
+        return jsonify({"error": "body가 비어 있습니다."}), 400
+    try:
+        html = build_html_preview(title, body)
+        return jsonify({"html": html})
+    except Exception as e:
+        return jsonify({"error": f"미리보기 생성 실패: {e}"}), 500
+
+
+@app.route("/test_format_apply", methods=["POST"])
+def test_format_apply():
+    """테스트 페이지 전용 — 짧은 원고에 LLM이 서식 지침 적용 (Phase A~D 생략, E만).
+
+    /generate 는 전체 원고를 새로 쓰느라 수분 걸림. 이 엔드포인트는 사용자가
+    이미 작성한 짧은 원고(5줄 내외)에 `ㄴ 주석`·`**볼드**`만 덧붙여 돌려준다.
+    """
+    if not API_KEY:
+        return jsonify({"error": "ANTHROPIC_API_KEY 미설정"}), 500
+    data = request.get_json(silent=True) or {}
+    body = (data.get("body") or "").strip()
+    product = data.get("product") or ""
+    model_key = data.get("model") or "Sonnet"  # 속도 기본 Sonnet, 품질 원하면 Opus
+    if not body:
+        return jsonify({"error": "body가 비었습니다"}), 400
+
+    # 서식 지침(모듈7) 로드
+    inst_dir = config.load_instructions_dir() or config.DEFAULT_INSTRUCTIONS_DIR
+    formatting_path = os.path.join(inst_dir, config.MODULE_FILES["formatting"])
+    try:
+        with open(formatting_path, "r", encoding="utf-8") as f:
+            formatting_guide = f.read()
+    except FileNotFoundError:
+        formatting_guide = "(서식 지침 파일 없음 — 기본 규칙으로 처리)"
+
+    system_prompt = (
+        "너는 블록 원고 서식 전문가다. 사용자가 준 짧은 원고에, 아래 서식 지침에 따라 "
+        "`ㄴ 주석`과 `**볼드**` 표식만 덧붙여서 돌려준다.\n\n"
+        "[중요 출력 규칙]\n"
+        "- 원본 문장 내용·순서 그대로 유지\n"
+        "- 원본의 빈 줄(문단 분리)은 **반드시 그대로 유지**\n"
+        "- 본문 라인 아래 `ㄴ 주석`으로 색상·형광펜·밑줄·볼드·인용구 지시\n"
+        "- **같은 문단(연속 본문 라인) 안에는 `ㄴ 주석` 한 개만**. 줄마다 ㄴ + 빈 줄 반복 금지\n"
+        "- 문단이 바뀌면 빈 줄 1줄로 분리 (원본의 문단 구조 존중)\n"
+        "- 배합명/성분명 등 특정 단어만 강조는 `ㄴ '단어' 색상 형광펜, 볼드` 형태\n"
+        "- 결과는 주석 섞인 원고 텍스트만 반환 — 설명·코드블록·서두·Phase 헤더 금지\n\n"
+        "[블록 묶음 예시]\n"
+        "잘못된 출력 (문단 안 줄마다 ㄴ + 빈 줄):\n"
+        "  의사선생님도 모르겠다고 하신다.\n"
+        "  ㄴ 빨간색\n"
+        "\n"
+        "  정말 답답함 그 자체다.\n"
+        "  ㄴ 빨간색\n"
+        "\n"
+        "올바른 출력 (한 문단 안엔 ㄴ 한 개, 문단 경계 빈 줄 유지):\n"
+        "  의사선생님도 모르겠다고 하신다.\n"
+        "  정말 답답함 그 자체다.\n"
+        "  뭐가 문제일까?\n"
+        "  ㄴ 빨간색\n"
+        "\n"
+        "  (다음 문단은 여기서 시작)\n\n"
+        "=== 서식 지침 (모듈7) ===\n"
+        + formatting_guide
+    )
+    user_prompt = (
+        f"제품: {product or '(지정 없음)'}\n\n"
+        f"[원고]\n{body}\n\n"
+        "위 원고에 서식 지침을 적용해 `ㄴ 주석`·`**볼드**`만 덧붙인 결과를 반환해줘."
+    )
+
+    holder = {"text": "", "error": None}
+    call_claude_api(
+        API_KEY, system_prompt, user_prompt,
+        lambda text, meta: holder.update({"text": text}),
+        lambda err: holder.update({"error": err}),
+        model_key=model_key, max_tokens=4000,
+    )
+    if holder["error"]:
+        return jsonify({"error": holder["error"]}), 500
+
+    raw = (holder["text"] or "").strip()
+    # LLM이 각 줄마다 ㄴ + 빈 줄 넣는 경향 방어 — 연속 본문-ㄴ-빈줄 패턴 압축
+    raw = _collapse_llm_over_spacing(raw)
+    # 파서 체인 + 줄 길이 정규화 (실제 /generate 흐름과 동일)
+    import output_parser
+    result = output_parser._em_dash_to_quote(raw)
+    result = output_parser._split_sentences_after_period(result)
+    result = output_parser._enforce_product_ingredient_format(result, product or None)
+    result = normalize_text(result)
+    return jsonify({"result": result, "raw_llm": raw, "model": model_key})
+
+
+def _collapse_llm_over_spacing(text):
+    """LLM이 과하게 `본문\\nㄴ 주석\\n(빈 줄)\\n본문\\nㄴ 주석` 식으로 출력한 경우
+    연속 ㄴ 주석 블록을 모아 마지막 한 줄로 압축.
+
+    같은 색상·볼드 조합(공통 서식)만 남기고 나머지는 드롭 — 보수적 병합.
+    다른 서식(예: 인용구)은 건드리지 않음.
+    """
+    import re as _re
+    if not text:
+        return text
+    lines = text.split("\n")
+    out = []
+    i = 0
+    # 패턴: (본문)(빈 줄*)(ㄴ 색/볼드)(빈 줄*) 반복 2회 이상
+    SIMPLE_ANN = _re.compile(
+        r"^ㄴ\s+(?:[\w가-힣\s,]+)?(빨간색|파란색|청록색|초록색|보라색|주황색|회색|하늘색|노란색)"
+        r"(?:\s*형광펜)?(?:\s*,\s*볼드)?(?:\s*,\s*밑줄)?\s*$"
+    )
+    while i < len(lines):
+        # 본문 라인 감지
+        s = lines[i].strip()
+        if not s or s.startswith("ㄴ") or s.startswith("★") or _re.match(r"^[─—–\-=_]{3,}$", s):
+            out.append(lines[i])
+            i += 1
+            continue
+        # 본문 시작 → 같은 "문단" (빈 줄 없이 이어지는) 안에서만 ㄴ 수집
+        # 빈 줄 만나면 즉시 블록 종료 (문단 경계 존중)
+        bodies = []
+        anns = []
+        j = i
+        while j < len(lines):
+            t = lines[j].strip()
+            if not t:
+                break  # 문단 경계 (빈 줄) 도달 → 압축 중단, 빈 줄은 out에 그대로 나감
+            if t.startswith("ㄴ"):
+                if SIMPLE_ANN.match(t):
+                    anns.append(t)
+                    j += 1
+                    continue
+                break  # 복잡한 ㄴ (타겟 있는, 인용구 등) → 블록 종료
+            # 본문 라인
+            bodies.append(lines[j])
+            j += 1
+        # 압축 조건: 본문 2줄 이상 + 단일 서식 ㄴ 2개 이상
+        if len(bodies) >= 2 and len(anns) >= 2:
+            # 공통 핵심 색상(첫 ㄴ 기준)만 추출
+            first_ann = anns[0]
+            color_m = _re.search(r"(빨간색|파란색|청록색|초록색|보라색|주황색|회색|하늘색|노란색)", first_ann)
+            is_hl = "형광펜" in first_ann
+            if color_m:
+                merged = f"ㄴ {color_m.group(1)}" + (" 형광펜" if is_hl else "")
+                out.extend(bodies)
+                out.append(merged)
+                i = j
+                continue
+        # 압축 안 함 — 원본 그대로
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+@app.route("/test_hook", methods=["POST"])
+def test_hook():
+    """output_parser 후처리 함수를 단건 호출해 결과를 반환 — 테스트 페이지 전용."""
+    import output_parser
+    data = request.get_json(silent=True) or {}
+    func = data.get("func", "")
+    body = data.get("body", "") or ""
+    product = data.get("product")
+    keyword = data.get("keyword")
+    try:
+        if func == "enforce":
+            result = output_parser._enforce_product_ingredient_format(body, product)
+        elif func == "inject_keyword":
+            result = output_parser._inject_keyword_target(body, keyword)
+        elif func == "split_sentences":
+            result = output_parser._split_sentences_after_period(body)
+        elif func == "parse_body":
+            # Phase E body 후처리 체인과 동일 순서
+            result = output_parser._split_sentences_after_period(body)
+            result = output_parser._enforce_product_ingredient_format(result, product)
+            result = output_parser._merge_same_target_annotations(result)
+            result = output_parser._inject_keyword_target(result, keyword)
+        elif func == "full_pipeline":
+            # 실제 /generate 흐름 재현: parse 체인 + normalize_text(줄 길이 28자 정리)
+            from docx_formatter import normalize_text
+            result = output_parser._split_sentences_after_period(body)
+            result = output_parser._enforce_product_ingredient_format(result, product)
+            result = output_parser._merge_same_target_annotations(result)
+            result = output_parser._inject_keyword_target(result, keyword)
+            result = normalize_text(result)
+        else:
+            return jsonify({"error": f"unknown func: {func}"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"result": result})
+
+
 @app.route("/products", methods=["GET"])
 def products():
     return jsonify({"products": config.PRODUCT_NAMES})
@@ -168,7 +371,7 @@ def generate():
     except Exception:
         pass
 
-    parsed = parse(holder["text"])
+    parsed = parse(holder["text"], product=product, keyword=keyword)
 
     # 편집창 = 미리보기/워드 출력 결과 일치 보장 — 본문 줄바꿈 정규화 후 반환
     normalized_body = normalize_text(parsed["body"])

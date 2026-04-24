@@ -4,7 +4,7 @@
 import os
 import sys
 
-VERSION = "1.0"
+VERSION = "1.9"
 
 def base_dir():
     if getattr(sys, 'frozen', False):

@@ -1,10 +1,8 @@
 """
-네이버 블로그 댓글 알림 v2.2
-- 개별 글 URL 단위 모니터링
-- 새 댓글 발견 시 Slack 알림
-- 비공개 조치 감지 시 Slack 알림
+네이버 블로그/카페 댓글·비공개 알림 v2.3
+- 블로그: 새 댓글 + 비공개 조치 감지
+- 카페: 비공개 조치(블라인드)만 감지 (댓글 X)
 - 30분 간격 자동 체크
-- commentCount API로 변동 감지 → 변동 글만 Selenium 스크래핑
 """
 
 import json
@@ -40,12 +38,31 @@ HEADERS = {
 
 
 def parse_post_url(url):
-    """URL에서 blog_id, log_no 추출. 실패 시 None."""
+    """블로그 URL → (blog_id, log_no). 실패 시 None."""
     url = url.strip()
-    # https://blog.naver.com/blogId/logNo
     m = re.search(r'blog\.naver\.com/([^/?#]+)/(\d+)', url)
     if m:
         return m.group(1), m.group(2)
+    return None
+
+
+def parse_cafe_url(url):
+    """카페 URL → (cafe_slug, article_id). 실패 시 None.
+    지원: https://cafe.naver.com/{slug}/{articleId}
+    """
+    url = url.strip()
+    m = re.search(r'cafe\.naver\.com/([^/?#]+)/(\d+)', url)
+    if m:
+        return m.group(1), m.group(2)
+    return None
+
+
+def classify_url(url):
+    """URL 종류 판별. 'blog' | 'cafe' | None"""
+    if parse_cafe_url(url):
+        return "cafe"
+    if parse_post_url(url):
+        return "blog"
     return None
 
 
@@ -118,6 +135,7 @@ class BlogMonitor:
         })
         self.state.setdefault("seen", {})
         self.state.setdefault("comment_counts", {})
+        self.state.setdefault("cafe_club_ids", {})  # slug → clubId 캐시
         self.driver = None
         self._baseline_done = False
 
@@ -225,6 +243,74 @@ class BlogMonitor:
         except Exception as e:
             self.log(f"  [에러] 비공개 상세 {blog_id}/{log_no}: {e}")
         return None
+
+    # ── 카페 clubId 조회 (캐싱) ───────────────────────
+    def _get_cafe_club_id(self, cafe_slug):
+        """카페 slug → clubId. state에 캐싱."""
+        cache = self.state["cafe_club_ids"]
+        if cafe_slug in cache:
+            return cache[cafe_slug]
+        try:
+            r = self.session.get(
+                f"https://cafe.naver.com/{cafe_slug}", timeout=10
+            )
+            m = re.search(r'g_sClubId\s*=\s*["\']?(\d+)', r.text)
+            if not m:
+                m = re.search(r'clubid["\':=\s]+(\d+)', r.text, re.I)
+            if m:
+                club_id = m.group(1)
+                cache[cafe_slug] = club_id
+                self.save_state()
+                return club_id
+        except Exception as e:
+            self.log(f"  [에러] clubId 조회 {cafe_slug}: {e}")
+        return None
+
+    # ── 카페 글 비공개 감지 (API) ─────────────────────
+    def _fetch_cafe_blind_info(self, club_id, article_id):
+        """카페 글 상태 조회.
+        반환: ("ok", None) | ("blind", {agency, reason, date}) |
+              ("member_only", None) | ("error", None)
+        """
+        url = (
+            f"https://apis.naver.com/cafe-web/cafe-articleapi/"
+            f"cafes/{club_id}/articles/{article_id}"
+        )
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 10) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Mobile Safari/537.36"
+            ),
+            "Referer": "https://m.cafe.naver.com/",
+            "X-Cafe-Product": "pc",
+        }
+        try:
+            r = self.session.get(url, headers=headers, timeout=10)
+            # 401: 로그인 필요한 카페의 일반 글 (비공개 아님)
+            if r.status_code == 401:
+                return "member_only", None
+            if r.status_code != 200:
+                return "error", None
+            data = r.json()
+            article = data.get("article") or \
+                data.get("result", {}).get("article")
+            if not article:
+                return "error", None
+            blind = article.get("blindInfo")
+            if blind:
+                return "blind", {
+                    "agency": blind.get("requester", "알 수 없음"),
+                    "reason": blind.get("reason", ""),
+                    "date": blind.get("requestDateToStr")
+                        or blind.get("requestDate", "알 수 없음"),
+                }
+            return "ok", None
+        except Exception as e:
+            self.log(
+                f"  [에러] 카페 API {club_id}/{article_id}: {e}"
+            )
+            return "error", None
 
     # ── 댓글 스크래핑 (Selenium) ──────────────────────
     def _switch_to_blog_frame(self):
@@ -449,16 +535,61 @@ class BlogMonitor:
         seen = self.state["seen"]
         alerted_private = self.state.setdefault("alerted_private", {})
 
-        # URL 파싱
-        parsed = []
+        # URL 파싱 — 블로그/카페 분리
+        parsed = []         # 블로그: (blog_id, log_no, url)
+        cafe_parsed = []    # 카페:   (cafe_slug, article_id, url)
         for url in post_urls:
-            result = parse_post_url(url)
-            if result:
-                blog_id, log_no = result
+            kind = classify_url(url)
+            if kind == "blog":
+                blog_id, log_no = parse_post_url(url)
                 parsed.append((blog_id, log_no, url))
+            elif kind == "cafe":
+                slug, aid = parse_cafe_url(url)
+                cafe_parsed.append((slug, aid, url))
+
+        if not parsed and not cafe_parsed:
+            self.log("유효한 URL이 없습니다.")
+            return 0
+
+        # ── 카페: 비공개만 체크 (댓글 스킵) ────────────
+        if cafe_parsed:
+            self.log(f"\n카페 비공개 확인 중... ({len(cafe_parsed)}개 글)")
+            for slug, aid, url in cafe_parsed:
+                key = f"cafe_{slug}_{aid}"
+                club_id = self._get_cafe_club_id(slug)
+                if not club_id:
+                    self.log(f"  [경고] clubId 조회 실패: {slug}")
+                    continue
+                status, info = self._fetch_cafe_blind_info(club_id, aid)
+                if status == "blind" and key not in alerted_private:
+                    agency = info["agency"]
+                    reason = info["reason"]
+                    req_date = info["date"]
+                    self.log(
+                        f"  🚨 카페 비공개 감지: {slug}/{aid} "
+                        f"(요청기관: {agency})"
+                    )
+                    msg = (
+                        f"🚨 *카페 비공개 조치 감지*\n"
+                        f"• 게시글: <{url}|{slug}/{aid}>\n"
+                        f"• 요청기관: {agency}\n"
+                        f"• 요청 일자: {req_date}\n"
+                        f"• 사유: {reason}"
+                    )
+                    self.send_slack(msg)
+                    alerted_private[key] = {
+                        "agency": agency,
+                        "reason": reason,
+                        "date": req_date,
+                        "detected_at": datetime.now().strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        ),
+                    }
+                time.sleep(0.1)
+            self.save_state()
 
         if not parsed:
-            self.log("유효한 URL이 없습니다.")
+            # 블로그 없으면 여기서 종료 (카페만 등록된 경우)
             return 0
 
         # 1단계: 댓글 수 + 비공개 확인 (모바일 페이지)
@@ -630,7 +761,7 @@ class BlogMonitor:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("네이버 블로그 댓글 알림 v2.2")
+        self.title("네이버 블로그·카페 알림 v2.3")
         self.geometry("780x600")
         self.monitor = BlogMonitor(log_fn=self._log)
         self.monitoring = False
@@ -666,7 +797,7 @@ class App(tk.Tk):
 
         self.entry = ttk.Entry(bf, width=35)
         self.entry.pack(pady=2)
-        self.entry.insert(0, "글 URL 붙여넣기")
+        self.entry.insert(0, "블로그/카페 URL 붙여넣기")
         self.entry.bind("<FocusIn>", self._clear_placeholder)
 
         ttk.Button(bf, text="추가", command=self._add).pack(
@@ -729,7 +860,7 @@ class App(tk.Tk):
 
     # ── 글 관리 ───────────────────────────────────────
     def _clear_placeholder(self, _):
-        if self.entry.get() == "글 URL 붙여넣기":
+        if self.entry.get() == "블로그/카페 URL 붙여넣기":
             self.entry.delete(0, "end")
 
     def _refresh_posts(self):
@@ -741,7 +872,7 @@ class App(tk.Tk):
 
     def _add(self):
         raw = self.entry.get().strip()
-        if not raw or raw == "글 URL 붙여넣기":
+        if not raw or raw == "블로그/카페 URL 붙여넣기":
             return
 
         # 여러 URL 한번에 추가 (줄바꿈/공백 구분)
@@ -751,7 +882,7 @@ class App(tk.Tk):
             url = url.strip()
             if not url:
                 continue
-            if not parse_post_url(url):
+            if not classify_url(url):
                 self._log(f"  [경고] 잘못된 URL: {url}")
                 continue
             if url in self.monitor.config["posts"]:
@@ -787,12 +918,12 @@ class App(tk.Tk):
         def do_add():
             raw = text.get("1.0", "end")
             urls = re.findall(
-                r'https?://blog\.naver\.com/[^\s,]+', raw
+                r'https?://(?:blog|cafe)\.naver\.com/[^\s,]+', raw
             )
             added = 0
             for url in urls:
                 url = url.strip()
-                if not parse_post_url(url):
+                if not classify_url(url):
                     continue
                 if url in self.monitor.config["posts"]:
                     continue

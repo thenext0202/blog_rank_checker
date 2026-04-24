@@ -1,6 +1,6 @@
 """
 가상회사 핵심 엔진
-- CEO(이꼭지) → 팀장(하늘) 라우팅 → 담당 직원 호출 → 결과 취합
+- CEO(치답이) → 팀장(하늘) 라우팅 → 담당 직원 호출 → 결과 취합
 - 하늘은 모든 직원의 작업 결과를 기억함
 - 직원들은 웹 검색 도구 사용 가능
 - 대화 이력 & 업무 노트 자동 저장/로드
@@ -282,7 +282,7 @@ class VirtualCompany:
 
         response = self.client.messages.create(**params)
 
-        # 도구 사용 루프 (최대 5회 — 검색 충분히 가능)
+        # 도구 사용 루프 (최대 5회)
         tool_round = 0
         while response.stop_reason == "tool_use" and tool_round < 5:
             tool_round += 1
@@ -306,6 +306,24 @@ class VirtualCompany:
             history.append({"role": "user", "content": tool_results})
 
             response = self.client.messages.create(**params | {"messages": history})
+
+        # 도구 5회 소진 후에도 텍스트 응답 없으면 → 도구 없이 마지막 호출
+        if response.stop_reason == "tool_use":
+            # 마지막 도구 결과까지 처리
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    result = self._execute_tool(block.name, block.input)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result
+                    })
+            history.append({"role": "assistant", "content": response.content})
+            history.append({"role": "user", "content": tool_results})
+            # 도구 제거하고 호출 → 텍스트 응답 강제
+            final_params = {k: v for k, v in params.items() if k != "tools"}
+            response = self.client.messages.create(**final_params | {"messages": history})
 
         # 최종 텍스트 응답 추출
         result = ""
@@ -345,7 +363,7 @@ class VirtualCompany:
 
     def chat(self, user_message: str, callback=None, on_event=None,
              is_cancelled=None) -> str:
-        """CEO(이꼭지) 메시지 처리 — 하늘 라우팅 → 직원 실행 → 결과 취합
+        """CEO(치답이) 메시지 처리 — 하늘 라우팅 → 직원 실행 → 결과 취합
         on_event: GUI용 콜백 — {"type": "routing|agent_start|agent_done", ...}
         is_cancelled: 중단 여부 확인 함수 (GUI에서 전달)
         """
@@ -389,7 +407,7 @@ class VirtualCompany:
             if prev_result:
                 full_task = f"[이전 팀원 작업 결과]\n{prev_result}\n\n[당신의 업무]\n{task}"
             else:
-                full_task = f"[CEO(이꼭지) 원본 요청]\n{user_message}\n\n[팀장 하늘 지시]\n{task}"
+                full_task = f"[CEO(치답이) 원본 요청]\n{user_message}\n\n[팀장 하늘 지시]\n{task}"
 
             result = self._call_agent(agent_id, full_task, callback=callback)
             prev_result = result
