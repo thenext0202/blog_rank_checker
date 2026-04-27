@@ -2067,14 +2067,7 @@
       document.getElementById('meta-chars').textContent = `${(data.char_count || 0).toLocaleString()}자`;
       document.getElementById('char-count').textContent = `${(data.char_count || 0).toLocaleString()}자`;
 
-      showStatus(`시트 ${data.sheet_row}행 기입 완료 — 워드 다운로드를 시작합니다...`, 'success');
-
-      // 시트 기입과 동시에 워드 자동 다운로드
-      try {
-        await downloadDocx();
-      } catch (e) {
-        console.warn('자동 워드 다운로드 실패:', e);
-      }
+      showStatus(`시트 ${data.sheet_row}행 기입 완료`, 'success');
     } catch (e) {
       showStatus('시트 기입 실패: ' + e.message, 'error');
       btn.disabled = false;

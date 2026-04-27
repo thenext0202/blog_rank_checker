@@ -137,6 +137,18 @@ def _is_merge_candidate_annotation(line):
     # 로직(L215~)이 별도 처리하므로 병합 우회가 안전.
     if '(' in inner and ')' in inner:
         return False
+    # v2.1.15~: 따옴표 없는 콤마 평문 단어 목록 제외.
+    # 예: `ㄴ 스페인감초추출물, 프로바이오틱스, 아연 → 노란 형광펜, 볼드`
+    # 콤마 split 후 색상/형광펜 키워드가 없는 토큰(=단어)이 섞여있으면 _parse_merge_annotation
+    # 의 키워드 필터(L159)가 그 단어 토큰들을 폐기 → ㄴ 라인이 `ㄴ 노란 형광펜, 볼드` 로 잘림.
+    # 표준은 따옴표 다중 단어(ANNOTATION_STANDARD.md). 평문 콤마는 원형 보존.
+    if quote_pairs == 0:
+        cleaned_check = re.sub(r"[—–]+", " ", inner)
+        toks = [t.strip(" -\t") for t in re.split(r"[,/]+", cleaned_check) if t.strip(" -\t")]
+        if len(toks) >= 2 and any(
+            not (_COLOR_NAMES_RE.search(t) or _FMT_KEYWORDS_RE.search(t)) for t in toks
+        ):
+            return False
     return bool(_COLOR_NAMES_RE.search(inner) or _FMT_KEYWORDS_RE.search(inner))
 
 
