@@ -969,13 +969,14 @@ def _merge_short_lines(lines):
             j += 1
         result.append(curr)
         i = j
-    # v2.1.10: 결과에서 여전히 짧은 줄(마침표 끝남 가드 때문에 합쳐지지 않은 케이스)을
-    # 앞 줄에 흡수. 사용자 요구 "한 문장 최소 10자(영문 16자) 이상" 강제.
+    # v2.1.10: 결과에서 여전히 짧은 줄을 앞 줄에 흡수. 단 앞 줄이 종결부호로 끝나면
+    # 한 줄에 두 문장이 섞여 어색해지므로 합치지 않음 (v2.1.10.3 가드).
     final = []
     for ln in result:
         if (final
                 and len(ln) < _min_len_for(ln)
-                and not _is_intentional_short(ln)):
+                and not _is_intentional_short(ln)
+                and not _ends_with_intentional_punct(final[-1].rstrip())):
             final[-1] = final[-1].rstrip() + ' ' + ln
         else:
             final.append(ln)
@@ -1033,9 +1034,10 @@ def _absorb_short_label_paragraphs(text):
 def _normalize_line_lengths(text):
     """블록 경계를 보존하며 각 블록 내에서 긴 줄 분할 + 짧은 줄 합침 적용.
     ★ 블로거 요청사항 박스 내부는 통째로 건드리지 않음.
-    v2.1.10: 짧은 `**라벨**` 단독 단락은 위 단락에 미리 흡수 (10자 미만 금지).
     """
-    text = _absorb_short_label_paragraphs(text)
+    # v2.1.10.2: _absorb_short_label_paragraphs 비활성화
+    # — 짧은 `**라벨**` 단독 단락을 위 단락 끝에 붙이는 게 시각적으로 어색하다는 사용자 피드백.
+    # 단독 라벨은 그대로 두고 v2.1.9 단순 모드(단락 통째 색칠)에 맡김 → 라벨 단어만 색칠됨.
     lines = text.split('\n')
     result = []
     block = []
@@ -1246,7 +1248,9 @@ def _build_document(text, normalize=True):
                 if _nxt.startswith('ㄴ') and _is_format_annotation(_nxt):
                     # v2.1.8~: 같은 색 시그니처일 때만 합침. 다른 색이면 별도 라인 유지
                     # (parse_annotation 한 번에 여러 색이 섞여 본문에 색이 새는 부작용 방지)
-                    if _ann_color_signature(_nxt) != _cur_sig:
+                    # v2.1.10.1: 링크 도구 ㄴ는 예외 — 위 색/밑줄/크기 ㄴ와 항상 합쳐 한 라벨로
+                    _is_link = ('링크' in _s) or ('링크' in _nxt)
+                    if not _is_link and _ann_color_signature(_nxt) != _cur_sig:
                         break
                     _combined = _combined + ', ' + _nxt.lstrip('ㄴ').strip()
                     _j += 1
