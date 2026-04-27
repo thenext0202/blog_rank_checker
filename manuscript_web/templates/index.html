@@ -603,6 +603,9 @@
                   <button class="tb-btn" onclick="applyFormat('unbold')" title="선택 주위 ** 제거">B 해제</button>
                   <button class="tb-btn" onclick="applyFormat('splitLine')" title="커서 줄의 마침표 뒤 문장 쪼갬">⏎ 쪼개기</button>
                 </div>
+                <div class="tb-group">
+                  <button class="tb-btn" id="undo-btn" onclick="undoState()" title="이전 상태로 되돌리기 (Ctrl+Shift+Z)" disabled>↶ 되돌리기</button>
+                </div>
               </div>
               <input type="text" id="title-input" class="manuscript-title" placeholder="제목" />
               <textarea id="body-input" class="manuscript-box" placeholder="원고 본문이 여기에 표시됩니다."></textarea>
@@ -676,12 +679,16 @@
     });
 
     // 본문 편집 시 실시간 글자수 + 키워드 카운트 + 미리보기 디바운스 갱신
+    let _typingSnapTimer = null;
     document.getElementById('body-input').addEventListener('input', () => {
       const n = document.getElementById('body-input').value.length;
       document.getElementById('char-count').textContent = `${n.toLocaleString()}자`;
       document.getElementById('meta-chars').textContent = `${n.toLocaleString()}자`;
       updateKeywordCount();
       schedulePreview();
+      // 2초 동안 입력이 없으면 한 번 스냅샷 (타이핑 묶음 단위로 되돌리기)
+      if (_typingSnapTimer) clearTimeout(_typingSnapTimer);
+      _typingSnapTimer = setTimeout(snapshotState, 2000);
     });
 
     // 제목 편집 시: body 내 '제목 :' 라인 동기화 + 미리보기 갱신
@@ -692,6 +699,28 @@
 
     // 키워드 입력이 바뀌면 카운트 갱신
     document.getElementById('keyword').addEventListener('input', updateKeywordCount);
+
+    // 좌우 스크롤 동기화: 편집창 ↔ 미리보기 (비율 기준)
+    // 한쪽이 다른쪽을 호출하지 않도록 _syncLock 플래그로 재진입 방지
+    (function setupScrollSync() {
+      const editor = document.getElementById('body-input');
+      const preview = document.getElementById('preview-box');
+      if (!editor || !preview) return;
+      let _syncLock = false;
+      const syncFrom = (src, dst) => {
+        if (_syncLock) return;
+        const srcMax = src.scrollHeight - src.clientHeight;
+        const dstMax = dst.scrollHeight - dst.clientHeight;
+        if (srcMax <= 0 || dstMax <= 0) return;
+        const ratio = src.scrollTop / srcMax;
+        _syncLock = true;
+        dst.scrollTop = ratio * dstMax;
+        // 다음 프레임에 잠금 해제 (스크롤 이벤트 큐 비우기)
+        requestAnimationFrame(() => { _syncLock = false; });
+      };
+      editor.addEventListener('scroll', () => syncFrom(editor, preview));
+      preview.addEventListener('scroll', () => syncFrom(preview, editor));
+    })();
 
     updateProductLink(true);  // 초기 1회
     updateFilenamePreview();  // 파일명 초기 표시
@@ -764,6 +793,8 @@
 
   // ── 응답 → 편집창 주입 (generate / reprocess 공용) ──
   function applyManuscriptResponse(data) {
+    // 본문 덮어쓰기 전 스냅샷
+    snapshotState();
     lastResult = data;
     document.getElementById('title-input').value = data.title || '';
     document.getElementById('body-input').value = data.body || '';
@@ -892,6 +923,8 @@
       const data = await res.json();
       if (!res.ok) { showStatus(data.error || '생성 실패', 'error'); return; }
 
+      // 본문 덮어쓰기 전 스냅샷
+      snapshotState();
       lastResult = data;
 
       // 원고 — 제목/본문 편집 가능 필드에 주입
@@ -1098,7 +1131,62 @@
     return s ? 'word' : 'paragraph';
   }
 
+  // ── 되돌리기 (스냅샷 스택) ──
+  // 자동 서식/재처리로 textarea.value를 통째로 바꾸면 브라우저 Ctrl+Z가 끊김 → 자체 스택으로 처리
+  const _undoStack = [];
+  const _UNDO_LIMIT = 50;
+  function snapshotState() {
+    const body = document.getElementById('body-input');
+    const title = document.getElementById('title-input');
+    if (!body) return;
+    const cur = {
+      body: body.value,
+      title: title ? title.value : '',
+      selStart: body.selectionStart,
+      selEnd: body.selectionEnd,
+      scrollTop: body.scrollTop,
+    };
+    // 직전 스냅샷과 동일하면 스킵 (중복 누적 방지)
+    const prev = _undoStack[_undoStack.length - 1];
+    if (prev && prev.body === cur.body && prev.title === cur.title) return;
+    _undoStack.push(cur);
+    if (_undoStack.length > _UNDO_LIMIT) _undoStack.shift();
+    const btn = document.getElementById('undo-btn');
+    if (btn) btn.disabled = false;
+  }
+  function undoState() {
+    if (_undoStack.length === 0) return;
+    const prev = _undoStack.pop();
+    const body = document.getElementById('body-input');
+    const title = document.getElementById('title-input');
+    if (body) {
+      body.value = prev.body;
+      try { body.selectionStart = prev.selStart; body.selectionEnd = prev.selEnd; } catch (e) {}
+      body.scrollTop = prev.scrollTop || 0;
+      // 글자수/키워드/미리보기 동기화
+      const n = body.value.length;
+      const cc = document.getElementById('char-count');
+      const mc = document.getElementById('meta-chars');
+      if (cc) cc.textContent = `${n.toLocaleString()}자`;
+      if (mc) mc.textContent = `${n.toLocaleString()}자`;
+      try { updateKeywordCount(); } catch (e) {}
+      try { schedulePreview(); } catch (e) {}
+    }
+    if (title) title.value = prev.title;
+    const btn = document.getElementById('undo-btn');
+    if (btn) btn.disabled = (_undoStack.length === 0);
+  }
+  // Ctrl+Shift+Z 단축키
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'Z' || e.key === 'z')) {
+      e.preventDefault();
+      undoState();
+    }
+  });
+
   function applyFormat(kind, value) {
+    // 서식 적용 전 스냅샷
+    snapshotState();
     const ta = document.getElementById('body-input');
     const text = ta.value;
     let start = ta.selectionStart;
@@ -1745,6 +1833,13 @@
         return;
       }
       box.innerHTML = data.html || '<div style="color:#94a3b8">빈 결과</div>';
+      // 갱신 후 편집창 스크롤 위치에 맞춰 미리보기도 같은 비율로 정렬
+      const editor = document.getElementById('body-input');
+      const eMax = editor.scrollHeight - editor.clientHeight;
+      const bMax = box.scrollHeight - box.clientHeight;
+      if (eMax > 0 && bMax > 0) {
+        box.scrollTop = (editor.scrollTop / eMax) * bMax;
+      }
     } catch (e) {
       if (mySeq !== _previewSeq) return;
       box.innerHTML = `<div style="color:#dc2626">미리보기 실패: ${e.message}</div>`;
