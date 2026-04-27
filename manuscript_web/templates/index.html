@@ -614,6 +614,7 @@
           <div class="manuscript-actions">
             <span class="edit-hint">좌측에서 편집 → 우측 미리보기 자동 갱신. 저장·다운로드는 좌측 편집본 기준.</span>
             <button class="docx-btn sheet-btn" id="btn-write-sheet" onclick="writeSheet()" disabled title="시트에 기입">시트에 기입</button>
+            <button class="docx-btn" id="btn-undo-row" onclick="undoSheetRow()" style="display:none; background:#b22; color:#fff;" title="방금 기입한 행 비우기">되돌리기</button>
             <button class="docx-btn" onclick="downloadDocx()" title="워드 저장">워드 저장</button>
             <button class="copy-btn" onclick="copyManuscript()" title="복사">복사</button>
           </div>
@@ -2059,6 +2060,13 @@
       btn.classList.add('done');
       btn.textContent = `✓ ${data.sheet_row}행 기입됨`;
 
+      // 되돌리기 버튼 노출 (행 번호 데이터 속성으로 보관)
+      const undoBtn = document.getElementById('btn-undo-row');
+      undoBtn.dataset.row = data.sheet_row;
+      undoBtn.style.display = '';
+      undoBtn.disabled = false;
+      undoBtn.textContent = '되돌리기';
+
       const sheetEl = document.getElementById('meta-sheet');
       sheetEl.textContent = `시트 ${data.sheet_row}행 기입`;
       sheetEl.style.display = '';
@@ -2072,6 +2080,46 @@
       showStatus('시트 기입 실패: ' + e.message, 'error');
       btn.disabled = false;
       btn.textContent = '시트에 기입';
+    }
+  }
+
+  // ── 시트 기입 되돌리기 (방금 기입한 행 비우기) ──
+  async function undoSheetRow() {
+    const undoBtn = document.getElementById('btn-undo-row');
+    const row = parseInt(undoBtn.dataset.row || '0', 10);
+    if (!row) { showStatus('되돌릴 행 정보가 없습니다.', 'error'); return; }
+    if (!confirm(`시트 ${row}행을 비웁니다. 되돌릴 수 없어요. 진행할까요?`)) return;
+
+    undoBtn.disabled = true;
+    undoBtn.textContent = '되돌리는 중...';
+    try {
+      const res = await fetch('/undo_row', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ row }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showStatus(data.error || '되돌리기 실패', 'error');
+        undoBtn.disabled = false;
+        undoBtn.textContent = '되돌리기';
+        return;
+      }
+      // 성공: 시트 메타 표시 제거, 기입 버튼 재활성화
+      undoBtn.style.display = 'none';
+      undoBtn.dataset.row = '';
+      const sheetEl = document.getElementById('meta-sheet');
+      sheetEl.textContent = '';
+      sheetEl.style.display = 'none';
+      const sheetBtn = document.getElementById('btn-write-sheet');
+      sheetBtn.classList.remove('done');
+      sheetBtn.textContent = '시트에 기입';
+      sheetBtn.disabled = false;
+      showStatus(`시트 ${row}행 되돌리기 완료`, 'success');
+    } catch (e) {
+      showStatus('되돌리기 실패: ' + e.message, 'error');
+      undoBtn.disabled = false;
+      undoBtn.textContent = '되돌리기';
     }
   }
 

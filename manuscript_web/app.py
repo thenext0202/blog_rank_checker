@@ -1,6 +1,7 @@
 """블록 원고 생성기 — Flask 웹 API (Railway 배포)."""
 import os
 import re
+import atexit
 import base64
 import tempfile
 import datetime
@@ -9,12 +10,21 @@ from urllib.parse import quote
 from flask import Flask, request, jsonify, render_template, Response
 
 # Google 서비스 계정 인증 (환경변수 base64 디코딩)
+# 임시파일은 프로세스 종료 시 자동 삭제 (인증 정보 디스크 잔존 방지)
 _cred_env = os.environ.get("GOOGLE_CREDENTIALS_B64", "")
 if _cred_env:
     _tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="wb")
     _tmp.write(base64.b64decode(_cred_env))
     _tmp.close()
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _tmp.name
+
+    def _cleanup_cred_tmp(path=_tmp.name):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+    atexit.register(_cleanup_cred_tmp)
 
 import config
 from api_client import call_claude_api, MODELS
@@ -24,7 +34,7 @@ from docx_writer import build_docx_bytes
 from html_formatter import build_html_preview
 from docx_formatter import normalize_text
 from sheet_writer import (
-    write_row, _open_ws, DEFAULT_TAB_NAME,
+    write_row, clear_row, _open_ws, DEFAULT_TAB_NAME,
     load_product_links, build_product_link,
     update_l_column_bulk,
     load_keyword_recommendations,
@@ -583,6 +593,28 @@ def write_sheet_route():
         "sheet_row": sheet_row,
         "char_count": char_count,
     })
+
+
+@app.route("/undo_row", methods=["POST"])
+def undo_row_route():
+    """방금 기입한 행을 빈 값으로 덮어쓰기 — 잘못 기입 되돌리기용."""
+    if not _auth_check(request):
+        return jsonify({"error": "인증 실패"}), 403
+
+    data = request.get_json(force=True) or {}
+    try:
+        row = int(data.get("row"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "row(행 번호)는 정수여야 합니다."}), 400
+
+    try:
+        clear_row(row)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"되돌리기 실패: {e}"}), 500
+
+    return jsonify({"ok": True, "row": row})
 
 
 def _docx_response(docx_bytes, filename):

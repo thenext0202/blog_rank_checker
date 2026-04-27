@@ -231,6 +231,20 @@ def write_row(
     return row
 
 
+def clear_row(row, sheet_id=None, tab_name=None):
+    """특정 행 A~M열을 빈 값으로 덮어쓰기 — 직전 기입 되돌리기용.
+
+    1행(헤더) 보호. 명시적 범위 update 사용 (append_rows 룰 준수).
+    """
+    if not isinstance(row, int) or row < 2:
+        raise ValueError(f"행 번호는 2 이상이어야 합니다 (입력: {row!r})")
+    ws = _open_ws(sheet_id, tab_name)
+    blanks = [[""] * 13]
+    range_name = f"A{row}:M{row}"
+    ws.update(range_name, blanks, value_input_option="USER_ENTERED")
+    return row
+
+
 def update_l_column_bulk(
     download_base_url, sheet_id=None, tab_name=None, dry_run=False,
 ):
