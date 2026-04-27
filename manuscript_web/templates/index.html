@@ -1049,6 +1049,11 @@
       if (/밑줄/.test(t)) return t;
       return t ? `${t}, 밑줄` : '밑줄';
     }
+    if (kind === 'bold') {
+      // 단락 모드 볼드 — 드래그 없이 B 누른 경우 또는 unbold 동기화에 사용
+      if (/(?<![A-Za-z])볼드(?![A-Za-z])/.test(t)) return t;
+      return t ? `${t}, 볼드` : '볼드';
+    }
     if (kind === 'quote') {
       // 인용구는 "인용구 N번 + 글자 크기 19 + 볼드" 3종 세트로 표기
       // (docx_formatter는 기본 19pt·볼드 자동 적용하지만, 편집창에서 한눈에 보이게)
@@ -1124,11 +1129,11 @@
       end -= rightPad;
     }
 
-    // 범위 자동 판정: 드래그 없으면 문단 전체, 드래그 있으면 단어 모드.
-    // 문단 모드: 커서가 있는 문단(빈 줄·ㄴ 블록으로 둘러싸인 연속 본문) 마지막 줄 뒤에
-    // `ㄴ 색상` 1개만 삽입. 빈 줄 자동 삽입 없음.
+    // 단락 단위 통일 (v2.1.12~):
+    // 색·형광펜·밑줄·볼드 모두 드래그 무관 항상 단락 끝 ㄴ에 적용.
+    // 단어/문장 단위 ㄴ 또는 본문 `**` 마크다운은 더 이상 만들지 않음.
     const _scope = _getScope(selected);
-    if (_scope === 'paragraph' && (kind === 'color' || kind === 'highlight' || kind === 'underline')) {
+    if (kind === 'color' || kind === 'highlight' || kind === 'underline' || kind === 'bold') {
       // 1) 커서가 ㄴ 라인에 있으면 위로 올라가 본문 라인 찾기
       let bodyStart = text.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
       const _lineOf = (pos) => {
@@ -1164,7 +1169,7 @@
         scanIdx = nlIdx + 1;
       }
       if (paragraphEnd < 0) {
-        showStatus('색상은 본문 줄에 커서를 두고 눌러주세요.', 'info');
+        showStatus('본문 줄에 커서를 두고 눌러주세요.', 'info');
         return;
       }
 
@@ -1183,6 +1188,7 @@
         if (kind === 'color') ann = `ㄴ ${value}`;
         else if (kind === 'highlight') ann = `ㄴ ${value} 형광펜`;
         else if (kind === 'underline') ann = 'ㄴ 밑줄';
+        else if (kind === 'bold') ann = 'ㄴ 볼드';
         newText = text.slice(0, paragraphEnd) + '\n' + ann + text.slice(paragraphEnd);
       }
       ta.value = newText;
@@ -1191,10 +1197,9 @@
       return;
     }
 
-    // 여러 줄 선택 → 각 줄의 선택 부분을 타겟으로 개별 적용
-    if (selected.includes('\n') &&
-        (kind === 'color' || kind === 'highlight' ||
-         kind === 'underline' || kind === 'quote' || kind === 'bold')) {
+    // 여러 줄 선택 — 색·형광·밑줄·볼드는 모두 위 단락 모드 분기에서 처리되므로 여기 도달 X.
+    // 인용구(quote)만 다중 줄 처리(여러 줄을 하나의 인용 블록으로 묶기 위함).
+    if (selected.includes('\n') && kind === 'quote') {
       // 선택 마지막이 개행이면 그 줄은 제외 (드래그 관성)
       let effEnd = end;
       if (effEnd > start && text[effEnd - 1] === '\n') effEnd--;
@@ -1285,24 +1290,10 @@
         if (kind === 'bold') {
           if (!pl.selTrim) continue;
           // 해당 줄의 선택 구간을 **..**로 감싸기 (좌우 공백 보존)
+          // v2.1.11~: ㄴ '단어' 볼드 라인은 더 이상 생성 X. 본문 마크다운만 유지.
           const wrapS = pl.selS + pl.innerLeftPad;
           const wrapE = pl.selE - pl.innerRightPad;
           out = out.slice(0, wrapS) + '**' + out.slice(wrapS, wrapE) + '**' + out.slice(wrapE);
-          const newLineEnd = pl.le + 4;  // ** 두 쌍 추가
-          const searchFrom = newLineEnd < out.length ? newLineEnd + 1 : out.length;
-          const found = _findWordAnnotation(out, searchFrom, pl.selTrim);
-          if (found) {
-            const markerIdx = found.line.indexOf(found.marker);
-            const head = found.line.slice(0, markerIdx + found.marker.length);
-            const tail = found.line.slice(markerIdx + found.marker.length).trimStart();
-            if (!/볼드/.test(tail)) {
-              const newTail = tail ? `${tail}, 볼드` : '볼드';
-              out = out.slice(0, found.lineStart) + `${head} ${newTail}` + out.slice(found.lineEnd);
-            }
-          } else {
-            const ann = `ㄴ '${pl.selTrim}' 볼드`;
-            out = out.slice(0, newLineEnd) + '\n' + ann + out.slice(newLineEnd);
-          }
           continue;
         }
 
@@ -1353,39 +1344,9 @@
     })();
     const cursorLine = text.slice(cursorLineStart, cursorLineEnd);
 
-    // 볼드: 선택 부분 **..** 래핑 + 기존 '단어' 주석 있으면 ', 볼드' 추가, 없으면 새 주석
+    // 볼드 (v2.1.12~): 드래그 무관 항상 단락 모드. 위 단락 분기에서 처리되므로 여기 도달 X.
+    // 안전장치만 남김.
     if (kind === 'bold') {
-      if (!selected) { showStatus('볼드는 단어를 선택해주세요.', 'info'); return; }
-      const before = text.slice(0, start);
-      const after = text.slice(end);
-      const wrapped = before + '**' + selected + '**' + after;
-      // 래핑 후 선택 끝 줄의 끝 (개행 직전) 재계산
-      const wrappedEnd = end + 4;
-      const lineEndAfterWrap = (() => {
-        const i = wrapped.indexOf('\n', wrappedEnd);
-        return i === -1 ? wrapped.length : i;
-      })();
-      // 래핑 줄의 다음 줄부터 '단어' 주석 탐색
-      const searchFrom = lineEndAfterWrap < wrapped.length ? lineEndAfterWrap + 1 : wrapped.length;
-      const found = _findWordAnnotation(wrapped, searchFrom, selected);
-      let newText;
-      if (found) {
-        const markerIdx = found.line.indexOf(found.marker);
-        const head = found.line.slice(0, markerIdx + found.marker.length);
-        const tail = found.line.slice(markerIdx + found.marker.length).trimStart();
-        if (/볼드/.test(tail)) {
-          newText = wrapped;  // 이미 볼드 속성 있음
-        } else {
-          const newTail = tail ? `${tail}, 볼드` : '볼드';
-          newText = wrapped.slice(0, found.lineStart) + `${head} ${newTail}` + wrapped.slice(found.lineEnd);
-        }
-      } else {
-        const annotation = `ㄴ '${selected}' 볼드`;
-        newText = wrapped.slice(0, lineEndAfterWrap) + '\n' + annotation + wrapped.slice(lineEndAfterWrap);
-      }
-      ta.value = newText;
-      ta.dispatchEvent(new Event('input'));
-      _refocus(start + 2, end + 2);
       return;
     }
     if (kind === 'unbold') {
@@ -1404,7 +1365,71 @@
           newS = start; newE = end - 4;
           innerCore = sel.slice(2, -2);
         } else {
-          showStatus('볼드 해제: **로 감싼 부분을 선택해주세요.', 'info');
+          // v2.1.11~: ** 래핑 없으면 단락 끝 ㄴ에서 '볼드' 토큰만 제거 시도
+          // (드래그 없이 B 누른 단락 모드 볼드의 해제 경로)
+          let bodyStart = text.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+          const _lineOf = (pos) => {
+            const e = text.indexOf('\n', pos);
+            return text.slice(pos, e === -1 ? text.length : e);
+          };
+          if (_lineOf(bodyStart).trimStart().startsWith('ㄴ')) {
+            let idx = bodyStart;
+            while (idx > 0) {
+              const prevStart = text.lastIndexOf('\n', idx - 2) + 1;
+              const prevText = text.slice(prevStart, idx - 1);
+              if (!prevText.trim()) break;
+              if (!prevText.trimStart().startsWith('ㄴ')) {
+                bodyStart = prevStart;
+                break;
+              }
+              idx = prevStart;
+              if (idx === 0) break;
+            }
+          }
+          let paragraphEnd = -1;
+          let scanIdx = bodyStart;
+          while (scanIdx < text.length) {
+            let nlIdx = text.indexOf('\n', scanIdx);
+            if (nlIdx === -1) nlIdx = text.length;
+            const lineText = text.slice(scanIdx, nlIdx);
+            if (!lineText.trim()) break;
+            if (lineText.trimStart().startsWith('ㄴ')) break;
+            paragraphEnd = nlIdx;
+            if (nlIdx >= text.length) break;
+            scanIdx = nlIdx + 1;
+          }
+          if (paragraphEnd < 0) {
+            showStatus('볼드 해제: 본문 줄 또는 **로 감싼 부분에 커서를 두세요.', 'info');
+            return;
+          }
+          const searchFrom = paragraphEnd < text.length ? paragraphEnd + 1 : text.length;
+          const mergeable = _findMergeableAnnotation(text, searchFrom, '');
+          if (!mergeable) {
+            showStatus('볼드 해제: 이 단락에 ㄴ 줄이 없어요.', 'info');
+            return;
+          }
+          const splitRes = _splitAnnotationHeadTail(mergeable.line, '');
+          const head0 = splitRes.head;
+          const tail0 = splitRes.tail;
+          if (!/(?<![A-Za-z])볼드(?![A-Za-z])/.test(tail0)) {
+            showStatus('볼드 해제: 이 단락 ㄴ에 볼드 속성이 없어요.', 'info');
+            return;
+          }
+          let cleanedTail = tail0
+            .replace(/(^|[,\s])볼드(?=[,\s]|$)/g, '$1')
+            .replace(/,\s*,/g, ',')
+            .replace(/^[,\s]+|[,\s]+$/g, '');
+          let updated;
+          const lineEndWithNL = mergeable.lineEnd < text.length ? mergeable.lineEnd + 1 : mergeable.lineEnd;
+          if (!cleanedTail) {
+            updated = text.slice(0, mergeable.lineStart) + text.slice(lineEndWithNL);
+          } else {
+            const newAnn = `${head0} ${cleanedTail}`;
+            updated = text.slice(0, mergeable.lineStart) + newAnn + text.slice(mergeable.lineEnd);
+          }
+          ta.value = updated;
+          ta.dispatchEvent(new Event('input'));
+          _refocus(start, end);
           return;
         }
       }
