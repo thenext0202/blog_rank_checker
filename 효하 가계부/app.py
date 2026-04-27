@@ -88,13 +88,21 @@ st.markdown("""
     .stTabs [data-baseweb="tab-panel"] { padding-top: 1rem; }
     /* expander 사이 여백 */
     .streamlit-expanderHeader { margin-top: 0.3rem; }
-    /* expander 내부 테이블 */
-    .dataframe { font-size: 0.85rem !important; }
+    /* expander 내부 테이블 — 글자 크기 키움 (30년 로드맵 표와 동일 1.2rem) */
+    .dataframe { font-size: 1.2rem !important; }
+    [data-testid="stDataFrame"] { font-size: 1.2rem !important; }
+    [data-testid="stDataFrame"] div[role="gridcell"],
+    [data-testid="stDataFrame"] div[role="columnheader"] {
+        font-size: 1.2rem !important;
+    }
+    [data-testid="stDataFrame"] [role="gridcell"] { padding: 8px 12px !important; }
     /* 메모 입력란 — 글자 크기 키움 */
     .stTextArea textarea {
-        font-size: 1.1rem !important;
-        line-height: 1.6 !important;
+        font-size: 1.25rem !important;
+        line-height: 1.65 !important;
     }
+    /* 메모 라벨도 살짝 키움 */
+    .stTextArea label p { font-size: 1.1rem !important; font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -660,6 +668,8 @@ with st.sidebar:
         "annual_savings": annual_savings,
         "return_rate": return_rate,
         "roadmap_years": roadmap_years,
+        # 사이드바와 무관한 필드 보존 (덮어쓰기 방지)
+        "roadmap_memo": _saved.get("roadmap_memo", ""),
     }
     if _new_settings != _saved:
         _ev, _rc, _ = load_roadmap_config()
@@ -797,7 +807,14 @@ if df is not None:
         _this_month_balance = int(_mdf["순수입(부호)"].sum())
 
 st.markdown("#### 🎯 목표 달성률")
-prog_col_top1, prog_col_top2 = st.columns(2)
+prog_col_top1, prog_col_top2 = st.columns(2, vertical_alignment="center")
+
+# 이번 년 이벤트 — 연간 목표 잔여 옆에 표시
+_events_for_yearly, _, _ = load_roadmap_config()
+_now_year_top = datetime.now().year
+_this_year_events_top = [e for e in _events_for_yearly if e.get("year") == _now_year_top]
+_ty_event_amt_top = sum(int(e.get("amount", 0) or 0) for e in _this_year_events_top)
+_ty_event_desc_top = ", ".join(e.get("desc", "") for e in _this_year_events_top) if _this_year_events_top else ""
 
 # 비교용 — 시트의 최신 월 우선, 없으면 사이드바 선택 월의 예산을 미리보기로 표시
 _compare_month = _this_month_label or selected_target_month
@@ -810,6 +827,159 @@ def _korean_month_label(mk):
         return f"{int(_yy)}년 {int(_mm)}월"
     except Exception:
         return mk
+
+
+# 전월 키 ('2026-04' → '2026-03')
+def _prev_month_key(mk):
+    try:
+        _y, _m = map(int, mk.split("-"))
+        if _m == 1:
+            return f"{_y-1:04d}-12"
+        return f"{_y:04d}-{_m-1:02d}"
+    except Exception:
+        return None
+
+
+# 전월 대비 증감 라벨 (지출 기준 — 늘면 빨강, 줄면 초록)
+# 컬럼별 너비 가중치 — 같은 컬럼명이면 어느 카테고리 표든 동일한 너비
+_COL_WEIGHTS = {
+    "날짜": 11,
+    "내용": 26,
+    "금액": 13,
+    "사용처": 12,
+    "결제 방법": 13,
+    "결제 여부": 11,
+    "소분류": 14,
+    "대분류": 14,
+    "비중": 8,
+    "카테고리": 16,
+    "예산": 13,
+    "실제 사용": 13,
+    "차이": 18,
+    "집행률": 9,
+    "상태": 10,
+    "회차": 8,
+    "년도": 8,
+    "나이": 7,
+    "보유 자산": 14,
+    "저축액": 12,
+    "수익률": 8,
+    "이벤트": 16,
+    "이벤트 금액": 13,
+    "합계": 14,
+}
+
+
+def _render_html_table(df, font_rem=1.15, header_bg="#f0f2f6"):
+    """st.dataframe 대체용 HTML 표 렌더 — 컬럼명 기준으로 너비 통일"""
+    if df is None or df.empty:
+        return ""
+    cols = list(df.columns)
+    # 각 컬럼 weight → 퍼센트
+    weights = [_COL_WEIGHTS.get(c, 12) for c in cols]
+    total = sum(weights)
+    widths = [w / total * 100 for w in weights]
+
+    td = (f"padding:10px 12px; border-bottom:1px solid #eee; "
+          f"font-size:{font_rem}rem; word-wrap:break-word; overflow-wrap:break-word; "
+          f"vertical-align:middle;")
+    th = (f"padding:12px 12px; border-bottom:2px solid #ddd; "
+          f"font-size:{font_rem}rem; font-weight:bold; background:{header_bg}; "
+          f"text-align:left; word-wrap:break-word;")
+
+    html = '<table style="width:100%; border-collapse:collapse; table-layout:fixed;">'
+    html += '<colgroup>'
+    for w in widths:
+        html += f'<col style="width:{w:.2f}%;">'
+    html += '</colgroup>'
+    html += '<thead><tr>'
+    for c in cols:
+        html += f'<th style="{th}">{c}</th>'
+    html += '</tr></thead><tbody>'
+    for _, row in df.iterrows():
+        html += '<tr>'
+        for c in cols:
+            html += f'<td style="{td}">{row[c]}</td>'
+        html += '</tr>'
+    html += '</tbody></table>'
+    return html
+
+
+def _to_korean_won(v):
+    """금액을 한글 단위로 (예: 100만원, 1.5억원, 5,000원)"""
+    v = abs(int(v))
+    if v == 0:
+        return "0원"
+    if v >= 100_000_000:
+        n = v / 100_000_000
+        return f"{n:.0f}억원" if n == int(n) else f"{n:.1f}억원"
+    if v >= 10_000:
+        n = v / 10_000
+        return f"{int(n)}만원" if n == int(n) else f"{n:.1f}만원"
+    return f"{v:,}원"
+
+
+def _korean_y_ticks(max_val):
+    """그래프 y축용 한글 단위 tick — (tickvals, ticktext) 반환"""
+    if max_val <= 0:
+        return [0], ["0원"]
+    # 자릿수 기반 step 자동 결정 (4~6개 정도의 tick이 나오도록)
+    import math
+    _exp = int(math.floor(math.log10(max_val)))
+    _base = 10 ** _exp
+    # base 기준으로 step 후보: 0.1, 0.2, 0.5, 1, 2, 5
+    for _m in [0.1, 0.2, 0.5, 1, 2, 5]:
+        _step = _base * _m
+        _n = int(max_val // _step) + 1
+        if 4 <= _n <= 7:
+            break
+    else:
+        _step = _base
+    _step = int(_step) if _step >= 1 else 1
+    vals = list(range(0, int(max_val * 1.1) + _step, _step))
+    return vals, [_to_korean_won(v) for v in vals]
+
+
+def _expense_emoji(pct):
+    """지출 증감율에 따른 이모지 — 양수=많이 씀(나쁨), 음수=절약(좋음)"""
+    if pct >= 30:  return "🤬"
+    if pct >= 15:  return "🥺"
+    if pct >= 5:   return "😐"
+    if pct <= -30: return "🎉"
+    if pct <= -10: return "🥰"
+    return ""
+
+
+def _delta_label_plain(this_amt, prev_amt, expense=True):
+    """expander 라벨용 — 평문 (지출이면 이모지 추가)"""
+    if prev_amt <= 0:
+        return "🆕 신규" if this_amt > 0 else ""
+    pct = (this_amt - prev_amt) / prev_amt * 100
+    if abs(pct) < 0.1:
+        return "(전월 동일)"
+    arrow = "▲" if pct > 0 else "▼"
+    emj = f" {_expense_emoji(pct)}" if expense else ""
+    return f"{arrow} {pct:+.1f}% (전월 {prev_amt:,.0f}원){emj}"
+
+
+def _delta_label_html(this_amt, prev_amt, expense=True):
+    """HTML 색상 라벨 — expense=True면 증가=빨강+이모지, expense=False(수입)면 증가=초록"""
+    if prev_amt <= 0:
+        if this_amt > 0:
+            return "<span style='color:#888; font-size:0.85em; font-weight:500;'>🆕 신규 (전월 0원)</span>"
+        return ""
+    pct = (this_amt - prev_amt) / prev_amt * 100
+    if abs(pct) < 0.1:
+        return "<span style='color:#888; font-size:0.85em; font-weight:500;'>(전월 동일)</span>"
+    if expense:
+        color = "#d32f2f" if pct > 0 else "#2e7d32"
+        emj = f" {_expense_emoji(pct)}"
+    else:
+        color = "#2e7d32" if pct > 0 else "#d32f2f"
+        emj = ""
+    arrow = "▲" if pct > 0 else "▼"
+    return (f"<span style='color:{color}; font-size:0.85em; font-weight:600;'>"
+            f"{arrow} {pct:+.1f}% (전월 {prev_amt:,.0f}원){emj}</span>")
 
 # 달성률 → 색상 + 이모지
 def _pct_color(pct_ratio):
@@ -874,13 +1044,32 @@ with prog_col_top2:
         st.markdown(
             f"<div style='color:{_y_color}; font-weight:700; font-size:1.05rem; margin:4px 0;'>"
             f"{_y_emoji} {_y_ratio:.1%} "
-            f"<span style='font-weight:500'>(잔여 {format_won_abs(_y_remain)} / 목표 {format_won_abs(yearly_target)})</span>"
+            f"<span style='font-weight:500'>(목표 {format_won_abs(yearly_target)} · 잔여 {format_won_abs(_y_remain)})</span>"
             f"</div>",
             unsafe_allow_html=True
         )
+        # 이번 년 이벤트 — 작은 글씨, 새 줄
+        if _this_year_events_top:
+            _ev_color_top = "#d32f2f" if _ty_event_amt_top < 0 else "#2e7d32" if _ty_event_amt_top > 0 else "#666"
+            _ev_desc_part_top = f" ({_ty_event_desc_top})" if _ty_event_desc_top else ""
+            st.markdown(
+                f"<div style='color:{_ev_color_top}; font-size:0.85rem; margin:2px 0 6px 0;'>"
+                f"이번 년 이벤트 {_ty_event_amt_top:+,.0f}원{_ev_desc_part_top}"
+                f"</div>",
+                unsafe_allow_html=True
+            )
         st.progress(y_pct_clamped)
     else:
         st.caption("📆 이번 년 목표 미설정 (사이드바에서 입력)")
+        if _this_year_events_top:
+            _ev_color_top = "#d32f2f" if _ty_event_amt_top < 0 else "#2e7d32"
+            _ev_desc_part_top = f" ({_ty_event_desc_top})" if _ty_event_desc_top else ""
+            st.markdown(
+                f"<div style='color:{_ev_color_top}; font-size:0.85rem;'>"
+                f"이번 년 이벤트 {_ty_event_amt_top:+,.0f}원{_ev_desc_part_top}"
+                f"</div>",
+                unsafe_allow_html=True
+            )
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
 if df is None:
@@ -989,14 +1178,22 @@ if df is not None:
         st.markdown("")
 
         # ─── 탭 ───
-        tab_income, tab_fixed, tab_variable, tab_chart, tab_memo, tab_goal = st.tabs([
-            "💰 수입", "🧾 고정지출", "🔄 변동지출", "📈 그래프", "🪞 회고", "🎯 목표"
+        tab_income, tab_fixed, tab_variable, tab_chart, tab_memo, tab_goal, tab_upload = st.tabs([
+            "💰 수입", "🧾 고정지출", "🔄 변동지출", "📈 그래프", "🪞 회고", "🎯 목표", "📤 업로드용"
         ])
 
         with tab_income:
             if income_df.empty:
                 st.info("이번 달 수입 내역이 없습니다.")
             else:
+                # 전월 소분류별 수입 사전
+                _prev_mk_inc = _prev_month_key(selected_month)
+                _prev_inc_by_sub = {}
+                if _prev_mk_inc:
+                    _prev_inc_df = df[(df["월"] == _prev_mk_inc) & (df["구분"] == "수입")]
+                    if not _prev_inc_df.empty:
+                        _prev_inc_by_sub = _prev_inc_df.groupby("소분류")["순수입(부호)"].sum().to_dict()
+
                 income_summary = income_df.groupby("소분류")["순수입(부호)"].sum().reset_index()
                 income_summary.columns = ["소분류", "금액"]
                 income_summary = income_summary.sort_values("금액", ascending=False)
@@ -1004,17 +1201,34 @@ if df is not None:
                     sub_cat = row["소분류"]
                     amount = row["금액"]
                     sub_items = income_df[income_df["소분류"] == sub_cat]
+                    _prev_a = _prev_inc_by_sub.get(sub_cat, 0)
+                    _delta_html = _delta_label_html(amount, _prev_a, expense=False)
+                    if _delta_html:
+                        st.markdown(
+                            f"<div style='margin: 6px 0 2px 12px;'>{_delta_html}</div>",
+                            unsafe_allow_html=True
+                        )
                     with st.expander(f"💰 {sub_cat} — {format_won_abs(amount)} ({len(sub_items)}건)"):
                         display_cols = ["날짜", "이름", "순수입(부호)", "사용처"]
                         display_df = sub_items[display_cols].copy()
                         display_df.columns = ["날짜", "내용", "금액", "사용처"]
                         display_df["금액"] = display_df["금액"].apply(lambda x: f"{x:,.0f}원")
-                        st.dataframe(display_df, use_container_width=True, hide_index=True)
+                        st.markdown(_render_html_table(display_df), unsafe_allow_html=True)
 
         with tab_fixed:
             if fixed_df.empty:
                 st.info("이번 달 고정지출 내역이 없습니다.")
             else:
+                # 전월 소분류별 고정지출 사전
+                _prev_mk_fix = _prev_month_key(selected_month)
+                _prev_fix_by_sub = {}
+                if _prev_mk_fix:
+                    _prev_fix_df = df[(df["월"] == _prev_mk_fix) &
+                                      (df["구분"] == "지출") &
+                                      (df["대분류"].str.contains("고정지출", na=False))]
+                    if not _prev_fix_df.empty:
+                        _prev_fix_by_sub = _prev_fix_df.groupby("소분류")["실 사용"].sum().to_dict()
+
                 fixed_summary = fixed_df.groupby("소분류")["실 사용"].sum().reset_index()
                 fixed_summary.columns = ["소분류", "금액"]
                 fixed_summary = fixed_summary.sort_values("금액", ascending=False)
@@ -1022,71 +1236,101 @@ if df is not None:
                     sub_cat = row["소분류"]
                     amount = row["금액"]
                     sub_items = fixed_df[fixed_df["소분류"] == sub_cat]
+                    _prev_a = _prev_fix_by_sub.get(sub_cat, 0)
+                    _delta_html = _delta_label_html(amount, _prev_a, expense=True)
+                    if _delta_html:
+                        st.markdown(
+                            f"<div style='margin: 6px 0 2px 12px;'>{_delta_html}</div>",
+                            unsafe_allow_html=True
+                        )
                     with st.expander(f"🧾 {sub_cat} — {format_won_abs(amount)} ({len(sub_items)}건)"):
                         display_cols = ["날짜", "이름", "실 사용", "결제 방법", "결제 여부"]
                         display_df = sub_items[display_cols].copy()
                         display_df.columns = ["날짜", "내용", "금액", "결제 방법", "결제 여부"]
                         display_df["금액"] = display_df["금액"].apply(lambda x: f"{x:,.0f}원")
-                        st.dataframe(display_df, use_container_width=True, hide_index=True)
+                        st.markdown(_render_html_table(display_df), unsafe_allow_html=True)
 
         with tab_variable:
             if variable_df.empty:
                 st.info("이번 달 변동지출 내역이 없습니다.")
             else:
-                # 사용처 필터
+                # 사용처 컬럼 정리 (필터 없이 그래프만)
                 all_usage = variable_df["사용처"].fillna("").astype(str).str.strip()
                 all_usage = all_usage.replace("", "미분류")
                 variable_df = variable_df.copy()
                 variable_df["사용처_표시"] = all_usage
                 usage_options = sorted(variable_df["사용처_표시"].unique().tolist())
 
+                # 사용처별 지출 요약 그래프 (필터 없이 항상 표시)
                 if len(usage_options) > 1:
-                    selected_usage = st.multiselect(
-                        "👥 사용처 필터",
-                        options=usage_options,
-                        default=usage_options,
-                        key="var_usage_filter"
-                    )
-                    filtered_var = variable_df[variable_df["사용처_표시"].isin(selected_usage)]
-                else:
-                    filtered_var = variable_df
-
-                # 사용처별 지출 요약 그래프
-                if len(usage_options) > 1 and not filtered_var.empty:
                     usage_summary = variable_df.groupby("사용처_표시")["실 사용"].sum().reset_index()
                     usage_summary.columns = ["사용처", "금액"]
                     usage_summary = usage_summary.sort_values("금액", ascending=False)
+
+                    _usage_max = usage_summary["금액"].max()
+                    _usage_vals, _usage_labels = _korean_y_ticks(_usage_max)
+
+                    # 사용처별 고정 색상
+                    _usage_color_map = {
+                        "공용": "#fff59d",       # 연노란색
+                        "효진 개인": "#f8bbd0",  # 연분홍색
+                        "효진 공용": "#b3e5fc",  # 하늘색
+                    }
 
                     ug_col1, ug_col2 = st.columns(2)
                     with ug_col1:
                         fig_usage_bar = px.bar(usage_summary, x="사용처", y="금액",
                                                text="금액", color="사용처",
+                                               color_discrete_map=_usage_color_map,
                                                color_discrete_sequence=px.colors.qualitative.Set2)
-                        fig_usage_bar.update_traces(texttemplate="%{text:,.0f}원", textposition="outside",
-                                                    textfont_size=13, cliponaxis=False)
-                        fig_usage_bar.update_layout(showlegend=False, height=320,
-                                                     margin=dict(l=10, r=10, t=50, b=10),
+                        fig_usage_bar.update_traces(
+                            texttemplate=[_to_korean_won(v) for v in usage_summary["금액"]],
+                            textposition="outside", textfont_size=18, cliponaxis=False)
+                        fig_usage_bar.update_layout(showlegend=False, height=380,
+                                                     margin=dict(l=10, r=10, t=60, b=10),
                                                      xaxis_title="", yaxis_title="",
-                                                     xaxis=dict(tickfont=dict(size=12)))
+                                                     xaxis=dict(tickfont=dict(size=16)),
+                                                     yaxis=dict(tickvals=_usage_vals,
+                                                                ticktext=_usage_labels,
+                                                                tickfont=dict(size=15)))
                         st.plotly_chart(fig_usage_bar, use_container_width=True)
                     with ug_col2:
                         fig_usage_pie = px.pie(usage_summary, values="금액", names="사용처",
+                                               color="사용처",
+                                               color_discrete_map=_usage_color_map,
                                                color_discrete_sequence=px.colors.qualitative.Set2, hole=0.3)
-                        fig_usage_pie.update_traces(textposition="inside", textinfo="label+percent", textfont_size=13)
-                        fig_usage_pie.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10),
-                                                     legend=dict(font=dict(size=12)))
+                        fig_usage_pie.update_traces(textposition="inside", textinfo="label+percent", textfont_size=17)
+                        fig_usage_pie.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10),
+                                                     legend=dict(font=dict(size=15)))
                         st.plotly_chart(fig_usage_pie, use_container_width=True)
                     st.markdown("---")
                     st.markdown("")
 
-                # 대분류→소분류 드릴다운 (필터 적용)
-                var_major = filtered_var.groupby("대분류")["실 사용"].sum().reset_index()
+                # 전월 대분류별 지출 사전 (증감율 비교용)
+                _prev_mk_var = _prev_month_key(selected_month)
+                _prev_var_by_cat = {}
+                if _prev_mk_var:
+                    _prev_var_df = df[(df["월"] == _prev_mk_var) &
+                                      (df["구분"] == "지출") &
+                                      (~df["대분류"].str.contains("고정지출", na=False))]
+                    if not _prev_var_df.empty:
+                        _prev_var_by_cat = _prev_var_df.groupby("대분류")["실 사용"].sum().to_dict()
+
+                # 대분류→소분류 드릴다운
+                var_major = variable_df.groupby("대분류")["실 사용"].sum().reset_index()
                 var_major.columns = ["대분류", "금액"]
                 var_major = var_major.sort_values("금액", ascending=False)
                 for _, major_row in var_major.iterrows():
                     major_cat = major_row["대분류"]
                     major_amount = major_row["금액"]
-                    major_items = filtered_var[filtered_var["대분류"] == major_cat]
+                    major_items = variable_df[variable_df["대분류"] == major_cat]
+                    _prev_amt = _prev_var_by_cat.get(major_cat, 0)
+                    _delta_html = _delta_label_html(major_amount, _prev_amt, expense=True)
+                    if _delta_html:
+                        st.markdown(
+                            f"<div style='margin: 6px 0 2px 12px;'>{_delta_html}</div>",
+                            unsafe_allow_html=True
+                        )
                     with st.expander(f"{major_cat} — {format_won_abs(major_amount)} ({len(major_items)}건)"):
                         sub_summary = major_items.groupby("소분류")["실 사용"].sum().reset_index()
                         sub_summary.columns = ["소분류", "금액"]
@@ -1100,7 +1344,7 @@ if df is not None:
                             display_df = sub_items[display_cols].copy()
                             display_df.columns = ["날짜", "내용", "금액", "결제 방법", "결제 여부", "사용처"]
                             display_df["금액"] = display_df["금액"].apply(lambda x: f"{x:,.0f}원")
-                            st.dataframe(display_df, use_container_width=True, hide_index=True)
+                            st.markdown(_render_html_table(display_df), unsafe_allow_html=True)
                             st.markdown("---")
 
         with tab_chart:
@@ -1901,6 +2145,523 @@ if df is not None:
                 save_memo(selected_month, memo)
                 st.success(f"✅ {selected_month} 회고가 저장되었습니다!")
 
+        # ─── 📤 업로드용 탭 — 한 장 요약 (인쇄/PDF용) ───
+        with tab_upload:
+            # 업로드용 전용 스타일 — 글자 크기 키움 + 표 행 통일
+            st.markdown("""
+            <style>
+            .up-section { font-size:1.6rem; font-weight:700; margin-top:1rem; margin-bottom:0.6rem; }
+            .up-subsection { font-size:1.25rem; font-weight:600; margin-top:1rem; margin-bottom:0.4rem; }
+            .up-divider { border-top:2px solid #e0e0e0; margin:2rem 0; }
+            </style>
+            """, unsafe_allow_html=True)
+
+            # 데이터 재로드 (탭 순서 무관)
+            _up_memo = load_memo(selected_month)
+            _up_goals = load_budget_goals()
+            _up_assets = load_assets_detail()
+            _up_events, _up_rate, _up_settings = load_roadmap_config()
+            _up_monthly_targets = _up_settings.get("monthly_targets", {}) or {}
+            _up_yearly_target = int(_up_settings.get("yearly_target", 0) or 0)
+
+            # 표 헬퍼: HTML 직접 렌더 (글자 1.2rem 고정, 스크롤 없음)
+            def _up_show_table(_d):
+                st.markdown(_render_html_table(_d, font_rem=1.2), unsafe_allow_html=True)
+
+            st.caption("👆 이 화면을 그대로 인쇄(Ctrl+P) → PDF로 저장하면 한 장 요약이 됩니다.")
+
+            # ─── 🎯 목표 달성률 (월간 + 연간) ───
+            _up_m_target = int(_up_monthly_targets.get(selected_month, 0) or 0)
+            _up_m_balance = int(balance)
+
+            # 연간 — 재산 내역 최신 월 합계
+            _up_monthly_assets = _up_assets.get("monthly", {})
+            _up_latest_asset_total = 0
+            _up_latest_asset_month = None
+            _up_cands = sorted([m for m, rows in _up_monthly_assets.items() if rows])
+            if _up_cands:
+                _up_latest_asset_month = _up_cands[-1]
+                _up_latest_asset_total = sum(int(r.get("amount", 0) or 0) for r in _up_monthly_assets[_up_latest_asset_month])
+
+            # 이번 년 이벤트
+            _up_now = datetime.now()
+            _up_year_now = _up_now.year
+            _up_this_year_events = [e for e in _up_events if e.get("year") == _up_year_now]
+            _up_ty_event_amt = sum(int(e.get("amount", 0) or 0) for e in _up_this_year_events)
+            _up_ty_event_desc = ", ".join(e.get("desc", "") for e in _up_this_year_events) if _up_this_year_events else ""
+
+            if _up_m_target > 0 or _up_yearly_target > 0:
+                st.markdown('<div class="up-section">🎯 목표 달성률</div>', unsafe_allow_html=True)
+                _gc1, _gc2 = st.columns(2, vertical_alignment="center")
+                with _gc1:
+                    st.markdown(f"**📅 {selected_month} 월간 목표**")
+                    if _up_m_target > 0:
+                        _mr = _up_m_balance / _up_m_target if _up_m_target else 0
+                        _mrem = max(_up_m_target - _up_m_balance, 0)
+                        _mc = _pct_color(_mr); _me = _pct_emoji(_mr)
+                        st.markdown(
+                            f"<div style='color:{_mc}; font-weight:700; font-size:1.2rem; margin:6px 0;'>"
+                            f"{_me} {_mr:.1%} <span style='font-weight:500; font-size:1.05rem'>"
+                            f"(잔액 {format_won_abs(_up_m_balance)} / 목표 {format_won_abs(_up_m_target)} · 잔여 {format_won_abs(_mrem)})"
+                            f"</span></div>", unsafe_allow_html=True)
+                        st.progress(max(min(_mr, 1.0), 0.0))
+                    else:
+                        st.caption(f"📅 {selected_month} 월간 목표 미설정")
+                with _gc2:
+                    _yl = f"{_up_year_now}년({_up_now.month}월 기준)"
+                    st.markdown(f"**📆 {_yl} 연간 목표**")
+                    if _up_yearly_target > 0:
+                        _yr = _up_latest_asset_total / _up_yearly_target if _up_yearly_target else 0
+                        _yrem = max(_up_yearly_target - _up_latest_asset_total, 0)
+                        _yc = _pct_color(_yr); _ye = _pct_emoji(_yr)
+                        st.markdown(
+                            f"<div style='color:{_yc}; font-weight:700; font-size:1.2rem; margin:6px 0;'>"
+                            f"{_ye} {_yr:.1%} <span style='font-weight:500; font-size:1.05rem'>"
+                            f"(목표 {format_won_abs(_up_yearly_target)} · 잔여 {format_won_abs(_yrem)})"
+                            f"</span></div>", unsafe_allow_html=True)
+                        if _up_this_year_events:
+                            _evc = "#d32f2f" if _up_ty_event_amt < 0 else "#2e7d32" if _up_ty_event_amt > 0 else "#666"
+                            _evd = f" ({_up_ty_event_desc})" if _up_ty_event_desc else ""
+                            st.markdown(
+                                f"<div style='color:{_evc}; font-size:0.9rem; margin:2px 0 6px 0;'>"
+                                f"이번 년 이벤트 {_up_ty_event_amt:+,.0f}원{_evd}</div>",
+                                unsafe_allow_html=True)
+                        st.progress(max(min(_yr, 1.0), 0.0))
+                    else:
+                        st.caption("📆 연간 목표 미설정")
+                st.markdown('<div class="up-divider"></div>', unsafe_allow_html=True)
+
+            # ─── ① 총 수입/총 지출/잔액 ───
+            st.markdown(f'<div class="up-section">📊 {selected_month} 요약</div>', unsafe_allow_html=True)
+            _uc1, _uc2, _uc3, _uc4 = st.columns(4)
+            with _uc1:
+                st.markdown(f'<div class="metric-card income"><div class="metric-label">총 수입</div>'
+                            f'<div class="metric-value">{format_won_abs(total_income)}</div></div>', unsafe_allow_html=True)
+            with _uc2:
+                st.markdown(f'<div class="metric-card expense"><div class="metric-label">총 지출</div>'
+                            f'<div class="metric-value">{format_won_abs(total_expense)}</div></div>', unsafe_allow_html=True)
+            with _uc3:
+                _bcls = "balance" if balance >= 0 else "expense"
+                st.markdown(f'<div class="metric-card {_bcls}"><div class="metric-label">잔액</div>'
+                            f'<div class="metric-value">{format_won(balance)}</div></div>', unsafe_allow_html=True)
+            with _uc4:
+                st.markdown(f'<div class="metric-card saving"><div class="metric-label">고정 / 변동</div>'
+                            f'<div class="metric-value" style="font-size:1.4rem">'
+                            f'{format_won_abs(total_fixed)} / {format_won_abs(total_variable)}</div></div>',
+                            unsafe_allow_html=True)
+            st.markdown('<div class="up-divider"></div>', unsafe_allow_html=True)
+
+            # ─── 🎯 예산 vs 실제 ───
+            _up_month_goals = _up_goals.get(selected_month, {}) or {}
+            _up_overall_goal = int(_up_month_goals.get("__total__", 0) or 0)
+            _up_cat_goals_dict = {k: int(v) for k, v in _up_month_goals.items()
+                                  if not k.startswith("__") and isinstance(v, (int, float)) and int(v) > 0}
+            _up_hidden = set(_up_goals.get("__hidden_cats__", []) or [])
+            _up_cat_goals_dict = {k: v for k, v in _up_cat_goals_dict.items() if k not in _up_hidden}
+            _up_total_spent = abs(expense_df["실 사용"].sum()) if not expense_df.empty else 0
+
+            if _up_overall_goal > 0 or _up_cat_goals_dict:
+                st.markdown('<div class="up-section">🎯 예산 vs 실제</div>', unsafe_allow_html=True)
+                if _up_overall_goal > 0:
+                    _diff = _up_overall_goal - _up_total_spent
+                    _pct = (_up_total_spent / _up_overall_goal * 100) if _up_overall_goal > 0 else 0
+                    _diff_cls = "income" if _diff >= 0 else "expense"
+                    _diff_lbl = f"절약 {format_won_abs(_diff)}" if _diff >= 0 else f"초과 {format_won_abs(-_diff)}"
+                    _emj = "🎉" if _pct <= 80 else ("✅" if _pct <= 100 else ("⚠️" if _pct <= 120 else "🚨"))
+                    _b1, _b2, _b3, _b4 = st.columns(4)
+                    with _b1:
+                        st.markdown(f'<div class="metric-card balance"><div class="metric-label">전체 예산</div>'
+                                    f'<div class="metric-value">{format_won_abs(_up_overall_goal)}</div></div>',
+                                    unsafe_allow_html=True)
+                    with _b2:
+                        st.markdown(f'<div class="metric-card expense"><div class="metric-label">실제 사용</div>'
+                                    f'<div class="metric-value">{format_won_abs(_up_total_spent)}</div></div>',
+                                    unsafe_allow_html=True)
+                    with _b3:
+                        st.markdown(f'<div class="metric-card {_diff_cls}"><div class="metric-label">{_emj} 차이</div>'
+                                    f'<div class="metric-value">{_diff_lbl}</div></div>', unsafe_allow_html=True)
+                    with _b4:
+                        st.markdown(f'<div class="metric-card saving"><div class="metric-label">집행률</div>'
+                                    f'<div class="metric-value">{_pct:.0f}%</div></div>', unsafe_allow_html=True)
+                    st.markdown("")
+
+                if _up_cat_goals_dict:
+                    _cord = _up_goals.get("__cat_order__", []) or []
+                    _ordered = [c for c in _cord if c in _up_cat_goals_dict]
+                    _ordered += [c for c in sorted(_up_cat_goals_dict.keys()) if c not in _ordered]
+                    _rows = []; _crows = []
+                    for cat in _ordered:
+                        g = _up_cat_goals_dict[cat]
+                        s = abs(expense_df[expense_df["대분류"] == cat]["실 사용"].sum()) if not expense_df.empty else 0
+                        diff = g - s
+                        pct = (s / g * 100) if g > 0 else 0
+                        stat = "🎉 여유" if pct <= 80 else ("✅ 적정" if pct <= 100 else ("⚠️ 주의" if pct <= 120 else "🚨 초과"))
+                        diff_label = f"-{abs(diff):,.0f}원 (절약)" if diff >= 0 else f"+{abs(diff):,.0f}원 (초과)"
+                        _rows.append({"카테고리": cat, "예산": f"{g:,.0f}원", "실제 사용": f"{s:,.0f}원",
+                                      "차이": diff_label, "집행률": f"{pct:.0f}%", "상태": stat})
+                        _crows.append({"카테고리": cat, "예산": g, "실제": s,
+                                       "색상": "#38ef7d" if pct <= 100 else "#f45c43"})
+                    st.markdown('<div class="up-subsection">📂 카테고리별 예산 vs 실제</div>', unsafe_allow_html=True)
+                    _up_show_table(pd.DataFrame(_rows))
+                    _cdf = pd.DataFrame(_crows)
+                    _fig_bv = go.Figure()
+                    _fig_bv.add_trace(go.Bar(name="예산", x=_cdf["카테고리"], y=_cdf["예산"],
+                                             marker_color="rgba(180,180,180,0.5)",
+                                             text=[f"{v:,.0f}원" for v in _cdf["예산"]],
+                                             textposition="outside", textfont_size=12, cliponaxis=False))
+                    _fig_bv.add_trace(go.Bar(name="실제", x=_cdf["카테고리"], y=_cdf["실제"],
+                                             marker_color=_cdf["색상"],
+                                             text=[f"{v:,.0f}원" for v in _cdf["실제"]],
+                                             textposition="outside", textfont_size=12, cliponaxis=False))
+                    _fig_bv.update_layout(barmode="group", height=420, margin=dict(l=10, r=10, t=40, b=10),
+                                          xaxis_title="", yaxis_title="원",
+                                          xaxis=dict(tickfont=dict(size=13)),
+                                          yaxis=dict(tickfont=dict(size=12), tickformat=",.0f"),
+                                          legend=dict(font=dict(size=13)))
+                    st.plotly_chart(_fig_bv, use_container_width=True, key="up_budget_vs_actual")
+                st.markdown('<div class="up-divider"></div>', unsafe_allow_html=True)
+
+            # ─── ② 재산 내역 (지금 기준 대분류) ───
+            st.markdown('<div class="up-section">💎 재산 내역 (지금 기준 대분류)</div>', unsafe_allow_html=True)
+            _today_key_up = _up_now.strftime("%Y-%m")
+            _asset_month_up = None
+            if _today_key_up in _up_monthly_assets and _up_monthly_assets[_today_key_up]:
+                _asset_month_up = _today_key_up
+            elif _up_cands:
+                _asset_month_up = _up_cands[-1]
+            if _asset_month_up is None:
+                st.info("재산 내역이 입력되지 않았습니다. (아래 '💎 재산 내역'에서 입력)")
+            else:
+                _adf = pd.DataFrame(_up_monthly_assets[_asset_month_up])
+                _adf["amount"] = pd.to_numeric(_adf["amount"], errors="coerce").fillna(0)
+                _by = _adf.groupby("category")["amount"].sum().reset_index()
+                _by.columns = ["대분류", "금액"]
+                _by = _by.sort_values("금액", ascending=False)
+                _ta = _by["금액"].sum()
+                _by["비중"] = (_by["금액"] / _ta * 100).round(1) if _ta > 0 else 0
+                st.caption(f"기준 월: **{_asset_month_up}** · 총 자산 **{format_won_abs(_ta)}**")
+                _al, _ar = st.columns([1, 1])
+                with _al:
+                    _disp_a = _by.copy()
+                    _disp_a["금액"] = _disp_a["금액"].apply(lambda v: f"{v:,.0f}원")
+                    _disp_a["비중"] = _disp_a["비중"].apply(lambda v: f"{v}%")
+                    _up_show_table(_disp_a)
+                with _ar:
+                    if _ta > 0:
+                        _fig_a = px.pie(_by, values="금액", names="대분류",
+                                        color_discrete_sequence=px.colors.qualitative.Pastel, hole=0.35)
+                        _fig_a.update_traces(textposition="inside", textinfo="label+percent", textfont_size=13)
+                        _fig_a.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10),
+                                             legend=dict(font=dict(size=12)))
+                        st.plotly_chart(_fig_a, use_container_width=True, key="up_assets_pie")
+
+                # 소분류 상세 — 토글로 숨김
+                with st.expander(f"📋 소분류 상세 보기 ({len(_adf)}건)", expanded=False):
+                    _disp_sub = _adf.copy()
+                    _disp_sub = _disp_sub.rename(columns={
+                        "category": "대분류", "subcategory": "소분류", "amount": "금액"
+                    })
+                    # 대분류 → 금액 내림차순으로 정렬
+                    _disp_sub = _disp_sub.sort_values(["대분류", "금액"], ascending=[True, False])
+                    _disp_sub["금액"] = _disp_sub["금액"].apply(lambda v: f"{v:,.0f}원")
+                    _up_show_table(_disp_sub[["대분류", "소분류", "금액"]])
+            st.markdown('<div class="up-divider"></div>', unsafe_allow_html=True)
+
+            # ─── ③ 수입 ───
+            st.markdown('<div class="up-section">💰 수입 내역</div>', unsafe_allow_html=True)
+            if income_df.empty:
+                st.caption("이번 달 수입 내역이 없습니다.")
+            else:
+                # 전월 소분류별 수입 사전
+                _up_prev_mk_inc = _prev_month_key(selected_month)
+                _up_prev_inc_by_sub = {}
+                if _up_prev_mk_inc:
+                    _up_prev_inc_df = df[(df["월"] == _up_prev_mk_inc) & (df["구분"] == "수입")]
+                    if not _up_prev_inc_df.empty:
+                        _up_prev_inc_by_sub = _up_prev_inc_df.groupby("소분류")["순수입(부호)"].sum().to_dict()
+
+                _is = income_df.groupby("소분류")["순수입(부호)"].sum().reset_index()
+                _is.columns = ["소분류", "금액"]
+                _is = _is.sort_values("금액", ascending=False)
+                for _, r in _is.iterrows():
+                    sub = r["소분류"]; amt = r["금액"]
+                    items = income_df[income_df["소분류"] == sub]
+                    _prev_a = _up_prev_inc_by_sub.get(sub, 0)
+                    _delta_html = _delta_label_html(amt, _prev_a, expense=False)
+                    _delta_part = f" &nbsp; {_delta_html}" if _delta_html else ""
+                    st.markdown(
+                        f'<div class="up-subsection">💰 {sub} — {format_won_abs(amt)} ({len(items)}건){_delta_part}</div>',
+                        unsafe_allow_html=True)
+                    d = items[["날짜", "이름", "순수입(부호)", "사용처"]].copy()
+                    d.columns = ["날짜", "내용", "금액", "사용처"]
+                    d["금액"] = d["금액"].apply(lambda x: f"{x:,.0f}원")
+                    _up_show_table(d)
+            st.markdown('<div class="up-divider"></div>', unsafe_allow_html=True)
+
+            # ─── ④ 고정지출 ───
+            st.markdown(f'<div class="up-section">🧾 고정지출 내역 — {format_won_abs(total_fixed)}</div>', unsafe_allow_html=True)
+            if fixed_df.empty:
+                st.caption("이번 달 고정지출 내역이 없습니다.")
+            else:
+                # 전월 소분류별 고정지출 사전
+                _up_prev_mk_fix = _prev_month_key(selected_month)
+                _up_prev_fix_by_sub = {}
+                if _up_prev_mk_fix:
+                    _up_prev_fix_df = df[(df["월"] == _up_prev_mk_fix) &
+                                         (df["구분"] == "지출") &
+                                         (df["대분류"].str.contains("고정지출", na=False))]
+                    if not _up_prev_fix_df.empty:
+                        _up_prev_fix_by_sub = _up_prev_fix_df.groupby("소분류")["실 사용"].sum().to_dict()
+
+                _fs = fixed_df.groupby("소분류")["실 사용"].sum().reset_index()
+                _fs.columns = ["소분류", "금액"]
+                _fs = _fs.sort_values("금액", ascending=False)
+                for _, r in _fs.iterrows():
+                    sub = r["소분류"]; amt = r["금액"]
+                    items = fixed_df[fixed_df["소분류"] == sub]
+                    _prev_a = _up_prev_fix_by_sub.get(sub, 0)
+                    _delta_html = _delta_label_html(amt, _prev_a, expense=True)
+                    _delta_part = f" &nbsp; {_delta_html}" if _delta_html else ""
+                    st.markdown(
+                        f'<div class="up-subsection">🧾 {sub} — {format_won_abs(amt)} ({len(items)}건){_delta_part}</div>',
+                        unsafe_allow_html=True)
+                    d = items[["날짜", "이름", "실 사용", "결제 방법", "결제 여부"]].copy()
+                    d.columns = ["날짜", "내용", "금액", "결제 방법", "결제 여부"]
+                    d["금액"] = d["금액"].apply(lambda x: f"{x:,.0f}원")
+                    _up_show_table(d)
+            st.markdown('<div class="up-divider"></div>', unsafe_allow_html=True)
+
+            # ─── ⑤ 변동지출 ───
+            st.markdown(f'<div class="up-section">🔄 변동지출 내역 — {format_won_abs(total_variable)}</div>', unsafe_allow_html=True)
+            if variable_df.empty:
+                st.caption("이번 달 변동지출 내역이 없습니다.")
+            else:
+                # 전월 대분류별 지출 사전 (증감율 비교용)
+                _up_prev_mk = _prev_month_key(selected_month)
+                _up_prev_by_cat = {}
+                if _up_prev_mk:
+                    _up_prev_df = df[(df["월"] == _up_prev_mk) &
+                                     (df["구분"] == "지출") &
+                                     (~df["대분류"].str.contains("고정지출", na=False))]
+                    if not _up_prev_df.empty:
+                        _up_prev_by_cat = _up_prev_df.groupby("대분류")["실 사용"].sum().to_dict()
+
+                _vm = variable_df.groupby("대분류")["실 사용"].sum().reset_index()
+                _vm.columns = ["대분류", "금액"]
+                _vm = _vm.sort_values("금액", ascending=False)
+                for _, mrow in _vm.iterrows():
+                    major = mrow["대분류"]; mamt = mrow["금액"]
+                    mitems = variable_df[variable_df["대분류"] == major]
+                    _prev_a = _up_prev_by_cat.get(major, 0)
+                    _delta_html = _delta_label_html(mamt, _prev_a, expense=True)
+                    _delta_part = f" &nbsp; {_delta_html}" if _delta_html else ""
+                    st.markdown(
+                        f'<div class="up-subsection">{major} — {format_won_abs(mamt)} ({len(mitems)}건){_delta_part}</div>',
+                        unsafe_allow_html=True)
+                    d = mitems[["날짜", "이름", "실 사용", "소분류", "사용처", "결제 방법", "결제 여부"]].copy()
+                    d.columns = ["날짜", "내용", "금액", "소분류", "사용처", "결제 방법", "결제 여부"]
+                    d["금액"] = d["금액"].apply(lambda x: f"{x:,.0f}원")
+                    _up_show_table(d)
+            st.markdown('<div class="up-divider"></div>', unsafe_allow_html=True)
+
+            # ─── ⑥ 그래프 ───
+            st.markdown('<div class="up-section">📈 그래프 — 어디에 얼마 썼나</div>', unsafe_allow_html=True)
+            _ebm = expense_df.groupby("대분류")["실 사용"].sum().reset_index()
+            _ebm.columns = ["대분류", "금액"]
+            _ebm = _ebm.sort_values("금액", ascending=False)
+            if _ebm.empty:
+                st.caption("이번 달 지출 내역이 없습니다.")
+            else:
+                _g1, _g2 = st.columns(2)
+                with _g1:
+                    _fb = px.bar(_ebm.sort_values("금액"), x="금액", y="대분류", orientation="h",
+                                 text="금액", color="대분류",
+                                 color_discrete_sequence=px.colors.qualitative.Set2)
+                    _fb.update_traces(
+                        texttemplate=[_to_korean_won(v) for v in _ebm.sort_values("금액")["금액"]],
+                        textposition="outside", textfont_size=18, cliponaxis=False)
+                    _fb.update_layout(showlegend=False, height=460,
+                                      margin=dict(l=10, r=140, t=10, b=10),
+                                      xaxis_title="", yaxis_title="",
+                                      xaxis=dict(tickfont=dict(size=15)),
+                                      yaxis=dict(tickfont=dict(size=17)))
+                    st.plotly_chart(_fb, use_container_width=True, key="up_expense_bar")
+                with _g2:
+                    _fp = px.pie(_ebm, values="금액", names="대분류",
+                                 color_discrete_sequence=px.colors.qualitative.Set2, hole=0.3)
+                    _fp.update_traces(textposition="inside", textinfo="label+percent", textfont_size=18)
+                    _fp.update_layout(height=460, margin=dict(l=10, r=10, t=10, b=10),
+                                      legend=dict(font=dict(size=15)))
+                    st.plotly_chart(_fp, use_container_width=True, key="up_expense_pie")
+            st.markdown('<div class="up-divider"></div>', unsafe_allow_html=True)
+
+            # ─── ⑦ 회고 (빈 칸 생략) ───
+            st.markdown(f'<div class="up-section">🪞 {selected_month} 회고</div>', unsafe_allow_html=True)
+            _overall_review = [
+                ("💰 정산", _up_memo.get("정산", "")),
+                ("💬 피드백", _up_memo.get("피드백", "")),
+                ("🔧 개선점", _up_memo.get("개선점", "")),
+                ("✅ 지난 달 반영 내역", _up_memo.get("지난 달 반영 내역", "")),
+            ]
+            _overall_filled = [(t, v) for t, v in _overall_review if str(v).strip()]
+            _goal_memo_up = _up_memo.get("목표 회고", {}) or {}
+            _cat_filled = []
+            for k, v in _goal_memo_up.items():
+                if not str(v).strip():
+                    continue
+                _lbl = "전체" if k == "__total__" else k
+                _cat_filled.append((_lbl, v))
+            if not _overall_filled and not _cat_filled:
+                st.info("아직 작성된 회고가 없습니다.")
+            else:
+                # 회고 메모 글자 크게
+                _memo_style = ("font-size:1.25rem; line-height:1.7; padding:10px 14px; "
+                               "background:#fafafa; border-left:4px solid #b3e5fc; "
+                               "border-radius:4px; margin-bottom:14px; white-space:pre-wrap;")
+                _memo_title_style = "font-size:1.35rem; font-weight:700; margin-top:14px; margin-bottom:6px;"
+                if _overall_filled:
+                    st.markdown('<div class="up-subsection">📝 종합 회고</div>', unsafe_allow_html=True)
+                    for title, txt in _overall_filled:
+                        st.markdown(f"<div style='{_memo_title_style}'>{title}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div style='{_memo_style}'>{txt}</div>", unsafe_allow_html=True)
+                if _cat_filled:
+                    st.markdown('<div class="up-subsection">📂 카테고리별 회고</div>', unsafe_allow_html=True)
+                    for label, txt in _cat_filled:
+                        st.markdown(f"<div style='{_memo_title_style}'>📂 {label}</div>", unsafe_allow_html=True)
+                        st.markdown(f"<div style='{_memo_style}'>{txt}</div>", unsafe_allow_html=True)
+            st.markdown('<div class="up-divider"></div>', unsafe_allow_html=True)
+
+            # ─── ⑧ 30년 자산 로드맵 ───
+            st.markdown('<div class="up-section">🛤️ 30년 자산 로드맵</div>', unsafe_allow_html=True)
+            _by_yr = int(_up_settings.get("birth_year", 1992))
+            _sa = int(_up_settings.get("roadmap_start_asset", 0))
+            _ann = int(_up_settings.get("annual_savings", 0))
+            _drate = float(_up_settings.get("return_rate", 5.0))
+            _years = int(_up_settings.get("roadmap_years", 30))
+            if _sa <= 0 and _ann <= 0:
+                st.info("로드맵 설정이 비어있습니다. 사이드바에서 시작 자산/연 저축액을 입력해주세요.")
+            else:
+                _rm = calc_roadmap(_by_yr, _sa, _ann, _drate, _up_events, _up_rate, years=_years)
+                _rmdf = pd.DataFrame(_rm)
+                st.caption(
+                    f"출생연도 **{_by_yr}** · 시작 자산 **{format_won_abs(_sa)}** · "
+                    f"연 저축 **{format_won_abs(_ann)}** · 기본 수익률 **{_drate}%** · {_years}년"
+                )
+
+                # 마일스톤
+                _ms_colors = {1:"#e8f5e9", 2:"#c8e6c9", 3:"#a5d6a7", 5:"#81c784",
+                              10:"#bbdefb", 20:"#90caf9", 30:"#c5cae9", 50:"#ffccbc", 100:"#fff9c4"}
+                def _ms_get(row_data, prev_total):
+                    cur = row_data["합계"]
+                    for tgt in sorted(_ms_colors.keys(), reverse=True):
+                        thr = tgt * 100_000_000
+                        if cur >= thr and prev_total < thr:
+                            return tgt
+                    return None
+
+                # 라인 그래프
+                _figln = go.Figure()
+                _figln.add_trace(go.Scatter(
+                    x=_rmdf["년도"], y=_rmdf["합계"], mode="lines+markers",
+                    name="연말 자산", line=dict(color="#667eea", width=3), marker=dict(size=7),
+                    hovertemplate="<b>%{x}년 (%{customdata}세)</b><br>자산: %{y:,.0f}원<extra></extra>",
+                    customdata=_rmdf["나이"],
+                ))
+                _ms_y, _ms_t, _ms_x, _ms_clr = [], [], [], []
+                _pt = 0
+                for _, _r in _rmdf.iterrows():
+                    _m = _ms_get(_r, _pt)
+                    if _m:
+                        _ms_y.append(_r["년도"]); _ms_t.append(_r["합계"])
+                        _ms_x.append(f"🏆 {_m}억 돌파!")
+                        _ms_clr.append(_ms_colors.get(_m, "#667eea"))
+                    _pt = _r["합계"]
+                if _ms_y:
+                    _figln.add_trace(go.Scatter(
+                        x=_ms_y, y=_ms_t, mode="markers+text", name="목표 달성",
+                        marker=dict(size=22, color=_ms_clr, symbol="star",
+                                    line=dict(width=2, color="#333")),
+                        text=_ms_x, textposition="top center", textfont=dict(size=16, color="#333"),
+                    ))
+                _evdf_up = _rmdf[_rmdf["이벤트"] != ""]
+                if not _evdf_up.empty:
+                    _figln.add_trace(go.Scatter(
+                        x=_evdf_up["년도"], y=_evdf_up["합계"], mode="markers+text",
+                        name="이벤트", marker=dict(size=16, color="#f45c43", symbol="diamond"),
+                        text=_evdf_up["이벤트"], textposition="bottom center", textfont=dict(size=15),
+                    ))
+                _mn = _rmdf["합계"].min(); _mx = _rmdf["합계"].max()
+                for _tgt in sorted(_ms_colors.keys()):
+                    _thr = _tgt * 100_000_000
+                    if _mn * 0.8 <= _thr <= _mx * 1.2:
+                        _figln.add_hline(y=_thr, line_dash="dash", line_color="rgba(0,0,0,0.15)",
+                                         annotation_text=f"{_tgt}억", annotation_position="right",
+                                         annotation_font_size=14)
+                _figln.update_layout(
+                    height=580, margin=dict(l=10, r=60, t=30, b=20),
+                    xaxis_title="년도", yaxis_title="자산 (원)",
+                    xaxis=dict(title_font_size=15, tickfont=dict(size=15)),
+                    yaxis=dict(title_font_size=15, tickformat=",", tickfont=dict(size=14)),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=15)),
+                )
+                st.plotly_chart(_figln, use_container_width=True, key="up_roadmap_line")
+
+                # 검증
+                if len(_rmdf) != _years:
+                    st.warning(f"⚠️ 예상 {_years}년치인데 {len(_rmdf)}행만 생성됨 — 데이터 확인 필요")
+                else:
+                    st.caption(f"✅ {_years}년치 모두 표시 (1년차 ~ {_years}년차)")
+
+                # 표 — 마일스톤 행 강조 (HTML)
+                _td = "padding:14px 16px; border-bottom:1px solid #eee; white-space:nowrap; text-align:center; font-size:1.2rem;"
+                _th = "padding:16px 16px; border-bottom:2px solid #ddd; text-align:center; white-space:nowrap; font-size:1.2rem; font-weight:bold;"
+                _thtml = '<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse;">'
+                _thtml += '<thead><tr style="background:#f0f2f6;">'
+                for _col in ["회차", "년도", "나이", "보유 자산", "저축액", "수익률", "이벤트", "이벤트 금액", "합계"]:
+                    _thtml += f'<th style="{_th}">{_col}</th>'
+                _thtml += '</tr></thead><tbody>'
+                _ptot = 0
+                for _i, _row in _rmdf.iterrows():
+                    _m = _ms_get(_row, _ptot)
+                    _bg = _ms_colors.get(_m, "transparent") if _m else "transparent"
+                    _fw = "font-weight:bold;" if _m else ""
+                    _badge = f' 🏆 {_m}억 돌파!' if _m else ""
+                    _et = _row["이벤트"] if _row["이벤트"] else "-"
+                    _ea = f'{_row["이벤트 금액"]:+,.0f}원' if _row["이벤트 금액"] != 0 else "-"
+                    _ec = "#d32f2f" if _row["이벤트 금액"] < 0 else "#2e7d32" if _row["이벤트 금액"] > 0 else ""
+                    _thtml += f'<tr style="background-color:{_bg};{_fw}">'
+                    _thtml += f'<td style="{_td}">{_i+1}년차</td>'
+                    _thtml += f'<td style="{_td}">{_row["년도"]}</td>'
+                    _thtml += f'<td style="{_td}">{_row["나이"]}세</td>'
+                    _thtml += f'<td style="{_td}">{_row["보유 자산"]:,.0f}원</td>'
+                    _thtml += f'<td style="{_td}">{_row["저축액"]:,.0f}원</td>'
+                    _thtml += f'<td style="{_td}">{_row["수익률"]}%</td>'
+                    _thtml += f'<td style="{_td}">{_et}</td>'
+                    _thtml += f'<td style="{_td} color:{_ec};">{_ea}</td>'
+                    _thtml += f'<td style="{_td}">{_row["합계"]:,.0f}원{_badge}</td>'
+                    _thtml += '</tr>'
+                    _ptot = _row["합계"]
+                _thtml += '</tbody></table></div>'
+                st.markdown(_thtml, unsafe_allow_html=True)
+
+                # 30년 로드맵 회고 메모 (읽기 전용 — 메인 앱에서 입력)
+                # 최신 파일 직접 다시 로드 (탭 렌더 시점과 저장 사이 동기화)
+                _, _, _up_settings_now = load_roadmap_config()
+                _up_rm_memo = str(_up_settings_now.get("roadmap_memo", "") or "").strip()
+                st.markdown('<div class="up-subsection" style="margin-top:24px;">🪞 30년 로드맵 회고</div>',
+                            unsafe_allow_html=True)
+                if _up_rm_memo:
+                    st.markdown(
+                        f"<div style='font-size:1.25rem; line-height:1.7; padding:14px 18px; "
+                        f"background:#fafafa; border-left:4px solid #c5cae9; border-radius:4px; "
+                        f"white-space:pre-wrap;'>{_up_rm_memo}</div>",
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.caption("💡 메인 앱 30년 로드맵 차트 아래 '🪞 30년 로드맵 회고' 입력란에 작성·저장하면 여기에 표시됩니다.")
+            st.markdown('<div class="up-divider"></div>', unsafe_allow_html=True)
+            st.caption("👆 이 화면을 그대로 인쇄(Ctrl+P)하면 PDF로 한 장 요약 저장됩니다.")
+
         # ─── 하단: 미결제 내역 ───
         st.markdown("")
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
@@ -2030,59 +2791,60 @@ _df_assets_display = _df_assets.rename(columns={
     "category": "대분류", "subcategory": "소분류", "amount": "금액"
 })
 
-# data_editor — 행 추가/수정/삭제 가능
-edited_df = st.data_editor(
-    _df_assets_display,
-    num_rows="dynamic",
-    use_container_width=True,
-    key=f"assets_editor_{selected_month}",
-    column_config={
-        "대분류": st.column_config.TextColumn("대분류", help="예: 투자금, 현금, 부동산", required=False),
-        "소분류": st.column_config.TextColumn("소분류", help="예: A 펀드, 주거래 통장", required=False),
-        "금액": st.column_config.NumberColumn(
-            "금액 (원)",
-            help="숫자만 입력 — 쉼표는 자동으로 표시됩니다",
-            format="localized",
-            min_value=0,
-            step=1_000_000,
-        ),
-    },
-)
+# data_editor — 행 추가/수정/삭제 가능 (소분류 상세 편집은 토글로 숨김)
+with st.expander(f"📋 소분류 상세 편집 / 추가 ({len(_df_assets_display)}건)", expanded=False):
+    edited_df = st.data_editor(
+        _df_assets_display,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"assets_editor_{selected_month}",
+        column_config={
+            "대분류": st.column_config.TextColumn("대분류", help="예: 투자금, 현금, 부동산", required=False),
+            "소분류": st.column_config.TextColumn("소분류", help="예: A 펀드, 주거래 통장", required=False),
+            "금액": st.column_config.NumberColumn(
+                "금액 (원)",
+                help="숫자만 입력 — 쉼표는 자동으로 표시됩니다",
+                format="localized",
+                min_value=0,
+                step=1_000_000,
+            ),
+        },
+    )
 
-# 저장 버튼
-asset_save_col, asset_del_col = st.columns([1, 1])
-with asset_save_col:
-    if st.button("💾 저장", type="primary", use_container_width=True, key="assets_save_btn"):
-        # 빈 행 제외, 정수 변환
-        new_rows = []
-        for _, r in edited_df.iterrows():
-            cat = str(r.get("대분류", "") or "").strip()
-            sub = str(r.get("소분류", "") or "").strip()
-            amt_raw = r.get("금액", 0)
-            try:
-                amt = int(amt_raw) if pd.notna(amt_raw) else 0
-            except (TypeError, ValueError):
-                amt = 0
-            # 모두 비어있는 행은 제외
-            if not cat and not sub and amt == 0:
-                continue
-            new_rows.append({"category": cat, "subcategory": sub, "amount": amt})
-        _monthly[selected_month] = new_rows
-        _assets_detail["monthly"] = _monthly
-        save_assets_detail(_assets_detail)
-        synced = sync_start_asset_from_detail()
-        st.success(f"💾 저장 완료 — 시작 보유 자산: {synced:,}원" if synced is not None else "💾 저장 완료")
-        st.rerun()
-
-with asset_del_col:
-    if st.button("🗑️ 이 월 삭제", use_container_width=True, key="assets_del_btn",
-                 help=f"{selected_month}의 모든 데이터 삭제"):
-        if selected_month in _monthly:
-            del _monthly[selected_month]
+    # 저장 버튼
+    asset_save_col, asset_del_col = st.columns([1, 1])
+    with asset_save_col:
+        if st.button("💾 저장", type="primary", use_container_width=True, key="assets_save_btn"):
+            # 빈 행 제외, 정수 변환
+            new_rows = []
+            for _, r in edited_df.iterrows():
+                cat = str(r.get("대분류", "") or "").strip()
+                sub = str(r.get("소분류", "") or "").strip()
+                amt_raw = r.get("금액", 0)
+                try:
+                    amt = int(amt_raw) if pd.notna(amt_raw) else 0
+                except (TypeError, ValueError):
+                    amt = 0
+                # 모두 비어있는 행은 제외
+                if not cat and not sub and amt == 0:
+                    continue
+                new_rows.append({"category": cat, "subcategory": sub, "amount": amt})
+            _monthly[selected_month] = new_rows
             _assets_detail["monthly"] = _monthly
             save_assets_detail(_assets_detail)
-            sync_start_asset_from_detail()
+            synced = sync_start_asset_from_detail()
+            st.success(f"💾 저장 완료 — 시작 보유 자산: {synced:,}원" if synced is not None else "💾 저장 완료")
             st.rerun()
+
+    with asset_del_col:
+        if st.button("🗑️ 이 월 삭제", use_container_width=True, key="assets_del_btn",
+                     help=f"{selected_month}의 모든 데이터 삭제"):
+            if selected_month in _monthly:
+                del _monthly[selected_month]
+                _assets_detail["monthly"] = _monthly
+                save_assets_detail(_assets_detail)
+                sync_start_asset_from_detail()
+                st.rerun()
 
 # 합계 표시 (현재 선택 월 기준, 편집 중인 값 반영)
 st.markdown("")
@@ -2555,6 +3317,32 @@ fig_roadmap.update_xaxes(
     tickvals=[r["년도"] for r in sec_rows[::2]],
 )
 st.plotly_chart(fig_roadmap, use_container_width=True)
+
+# ─── 30년 로드맵 회고 메모 ───
+st.markdown("")
+st.markdown("#### 🪞 30년 로드맵 회고")
+st.caption("자산 계획 점검 · 향후 전략 · 떠오르는 생각 등 자유롭게 기록 (자동으로 영구 저장)")
+
+_rm_events, _rm_rates, _rm_settings = load_roadmap_config()
+_rm_memo_saved = str(_rm_settings.get("roadmap_memo", "") or "")
+_rm_memo_input = st.text_area(
+    "회고 메모",
+    value=_rm_memo_saved,
+    height=240,
+    key="roadmap_memo_input",
+    placeholder="예: 2031년 14% 수익 구간이 너무 낙관적인 가정 같다 / 결혼 비용 25M은 신혼여행 포함이라 합리적 / 50대 진입 전 100억 돌파 가능 여부 재검토 필요…",
+    label_visibility="collapsed",
+)
+_rm_btn1, _rm_btn2 = st.columns([1, 4])
+with _rm_btn1:
+    if st.button("💾 메모 저장", type="primary", use_container_width=True, key="roadmap_memo_save"):
+        _rm_settings["roadmap_memo"] = _rm_memo_input
+        save_roadmap_config(_rm_events, _rm_rates, _rm_settings)
+        st.success("✅ 30년 로드맵 회고가 저장되었습니다.")
+        st.rerun()
+with _rm_btn2:
+    if _rm_memo_saved.strip():
+        st.caption(f"📌 마지막 저장본 길이 {len(_rm_memo_saved):,}자")
 
 # ─── 하단 정보 ───
 st.markdown("---")
