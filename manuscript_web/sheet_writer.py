@@ -22,6 +22,10 @@ SCOPES = [
 # 제품 링크 탭 이름 (A=제품명, B=제품 약어, C=base 링크)
 PRODUCT_LINK_TAB = "제품 링크"
 
+# 추천 키워드 탭 이름
+# 컬럼: A=제품, B=키워드, C=순위, D=블로거명, E=발행처, F=링크, G=발행일자, H=연속일, I=전환금액
+KEYWORD_BOARD_TAB = "키워드 전광판"
+
 # 행 높이 고정값 (픽셀) — 본문이 길어도 시트 행이 늘어나지 않게 고정
 ROW_PIXEL_SIZE = 21
 
@@ -59,6 +63,70 @@ def load_product_links(sheet_id=None):
         return out
     except Exception as e:
         print(f"[sheet_writer] 제품 링크 로드 실패: {e}")
+        return {}
+
+
+def _to_int(s):
+    """'1,200', '20', '0원', '' → 정수. 실패 시 0."""
+    if s is None:
+        return 0
+    t = str(s).strip().replace(",", "").replace("원", "")
+    if not t:
+        return 0
+    try:
+        return int(float(t))
+    except ValueError:
+        return 0
+
+
+def load_keyword_recommendations(sheet_id=None):
+    """'키워드 전광판' 탭에서 {제품명: [추천 항목]} 로드.
+
+    우선순위:
+    - 1순위: 순위 셀이 비어있거나 "밖" 포함
+    - 2순위: 연속일 ≥ 20 AND 전환금액 == 0
+    - 3순위: 그 외 전부
+    각 제품 내 1→2→3 순으로 정렬. 실패 시 빈 dict (앱 기동 방해 X).
+    """
+    try:
+        ws = _open_ws(sheet_id, KEYWORD_BOARD_TAB)
+        out = {}
+        for row in ws.get_all_values()[1:]:  # 헤더 제외
+            # 행 길이 부족하면 빈 문자열로 패딩 (트레일링 빈 셀이 잘려 나오는 경우 방지)
+            if len(row) < 9:
+                row = list(row) + [""] * (9 - len(row))
+            product = row[0].strip()
+            keyword = row[1].strip()
+            if not product or not keyword:
+                continue
+            rank = row[2].strip()
+            series_days = _to_int(row[7])
+            conversion = _to_int(row[8])
+
+            if rank == "" or "밖" in rank:
+                priority = 1
+            elif series_days >= 20 and conversion == 0:
+                priority = 2
+            else:
+                priority = 3
+
+            out.setdefault(product, []).append({
+                "keyword": keyword,
+                "priority": priority,
+                "rank": rank,
+                "series_days": series_days,
+                "conversion": conversion,
+                "blogger": row[3].strip(),
+                "publisher": row[4].strip(),
+                "link": row[5].strip(),
+                "pub_date": row[6].strip(),
+            })
+        # 제품별 1→2→3 정렬 (안정 정렬: 같은 priority 내 입력 순서 유지)
+        for items in out.values():
+            items.sort(key=lambda x: x["priority"])
+        return out
+    except Exception as e:
+        print(f"[sheet_writer] 키워드 전광판 로드 실패: {e}")
         return {}
 
 

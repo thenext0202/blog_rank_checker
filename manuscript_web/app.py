@@ -27,6 +27,7 @@ from sheet_writer import (
     write_row, _open_ws, DEFAULT_TAB_NAME,
     load_product_links, build_product_link,
     update_l_column_bulk,
+    load_keyword_recommendations,
 )
 
 app = Flask(__name__)
@@ -38,6 +39,8 @@ API_SECRET = os.environ.get("API_SECRET", "")
 _SYSTEM_PROMPT = None
 # 제품 링크 마스터 캐시 (시트에서 1회 로드) — 수동 새로고침은 /reload_products
 _PRODUCT_LINKS = None
+# 추천 키워드 캐시 — 새로고침은 /recommend_keywords?refresh=1
+_KEYWORD_RECS = None
 
 
 def get_system_prompt():
@@ -52,6 +55,13 @@ def get_product_links():
     if _PRODUCT_LINKS is None:
         _PRODUCT_LINKS = load_product_links()
     return _PRODUCT_LINKS
+
+
+def get_keyword_recommendations(force_reload=False):
+    global _KEYWORD_RECS
+    if _KEYWORD_RECS is None or force_reload:
+        _KEYWORD_RECS = load_keyword_recommendations()
+    return _KEYWORD_RECS
 
 
 def _auth_check(req):
@@ -329,6 +339,18 @@ def reload_products():
     global _PRODUCT_LINKS
     _PRODUCT_LINKS = load_product_links()
     return jsonify({"ok": True, "count": len(_PRODUCT_LINKS)})
+
+
+@app.route("/recommend_keywords", methods=["GET"])
+def recommend_keywords():
+    """'키워드 전광판' 탭의 추천 키워드 조회.
+
+    - 페이지 로드 시 1회 캐시 사용
+    - ?refresh=1 → 시트 다시 읽어 캐시 갱신
+    """
+    refresh = request.args.get("refresh", "") == "1"
+    data = get_keyword_recommendations(force_reload=refresh)
+    return jsonify({"recommendations": data})
 
 
 @app.route("/generate", methods=["POST"])

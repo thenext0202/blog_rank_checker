@@ -250,6 +250,60 @@
   .tab-content { display: none; padding: 16px 0; }
   .tab-content.active { display: block; }
 
+  /* 추천 키워드 탭 */
+  .recommend-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 0 12px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .recommend-toolbar label { font-size: 13px; color: var(--text-muted); cursor: pointer; }
+  .rec-group {
+    margin-bottom: 14px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: #fafbfc;
+  }
+  .rec-group-title {
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .rec-empty { color: var(--text-muted); font-size: 13px; padding: 4px 0; }
+  .rec-chip {
+    display: inline-block;
+    padding: 5px 12px;
+    margin: 3px 4px 3px 0;
+    border-radius: 14px;
+    cursor: pointer;
+    font-size: 13px;
+    border: 1px solid transparent;
+    user-select: none;
+    transition: opacity 0.15s, transform 0.05s;
+  }
+  .rec-chip:hover { opacity: 0.85; }
+  .rec-chip:active { transform: scale(0.96); }
+  .rec-chip.added { opacity: 0.45; cursor: default; text-decoration: line-through; }
+  .rec-p1 .rec-group-title { color: #b91c1c; }
+  .rec-p1 .rec-chip { background: #fee2e2; color: #b91c1c; border-color: #fecaca; }
+  .rec-p2 .rec-group-title { color: #9a3412; }
+  .rec-p2 .rec-chip { background: #fed7aa; color: #9a3412; border-color: #fdba74; }
+  .rec-p3 .rec-group-title { color: #475569; }
+  .rec-p3 .rec-chip { background: #e5e7eb; color: #374151; border-color: #d1d5db; }
+  .rec-hint {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+    padding: 4px 0;
+  }
+
   /* 원고 표시 (편집 가능) */
   .manuscript-title {
     width: 100%;
@@ -551,6 +605,7 @@
       <div class="tabs">
         <button class="tab-btn active" onclick="switchTab('manuscript')">원고 + 서식 미리보기</button>
         <button class="tab-btn" onclick="switchTab('analysis')">분석 (Phase A/B/B-2/D)</button>
+        <button class="tab-btn" onclick="switchTab('recommend')">추천 키워드</button>
       </div>
 
       <div style="padding: 16px;">
@@ -632,6 +687,19 @@
               Phase A (페르소나) / B (블록 구성) / B-2 (심의·논문) / D (심의 검수) 결과가 여기에 표시됩니다.
             </div>
           </div>
+        </div>
+
+        <!-- 추천 키워드 탭: 키워드 전광판 시트 기반 -->
+        <div id="tab-recommend" class="tab-content">
+          <div class="recommend-toolbar">
+            <button class="copy-btn" onclick="reloadRecommendations()" title="시트 다시 읽기">↻ 새로고침</button>
+            <label><input type="checkbox" id="rec-current-only" checked /> 현재 제품만</label>
+            <span id="rec-status" class="meta-item"></span>
+          </div>
+          <div id="rec-priority-1" class="rec-group rec-p1"></div>
+          <div id="rec-priority-2" class="rec-group rec-p2"></div>
+          <div id="rec-priority-3" class="rec-group rec-p3"></div>
+          <div class="rec-hint">※ 클릭하면 위쪽 "키워드" 입력칸에 자동 추가됩니다 (이미 추가된 키워드는 회색 처리).</div>
         </div>
       </div>
     </div>
@@ -724,6 +792,13 @@
 
     updateProductLink(true);  // 초기 1회
     updateFilenamePreview();  // 파일명 초기 표시
+
+    // 추천 키워드: 초기 로드 + 제품 변경/필터 토글 시 다시 그림
+    loadRecommendations();
+    document.getElementById('product').addEventListener('change', renderRecommendations);
+    document.getElementById('rec-current-only').addEventListener('change', renderRecommendations);
+    // 키워드 input이 변경되면 칩의 'added' 표시도 갱신
+    document.getElementById('keyword').addEventListener('input', updateChipAddedState);
   });
 
   // 제목 input → body 내 '제목 : ...' 라인 실시간 동기화
@@ -986,9 +1061,111 @@
     const btns = document.querySelectorAll('.tab-btn');
     btns.forEach(b => {
       if ((name === 'manuscript' && b.textContent.includes('원고')) ||
-          (name === 'analysis' && b.textContent.includes('분석'))) {
+          (name === 'analysis' && b.textContent.includes('분석')) ||
+          (name === 'recommend' && b.textContent.includes('추천'))) {
         b.classList.add('active');
       }
+    });
+  }
+
+  // ── 추천 키워드 (키워드 전광판 시트) ──
+  let _recommendData = {};  // {제품명: [{keyword, priority, ...}]}
+
+  async function loadRecommendations(refresh) {
+    const status = document.getElementById('rec-status');
+    if (status) status.textContent = refresh ? '새로고침 중…' : '불러오는 중…';
+    try {
+      const url = '/recommend_keywords' + (refresh ? '?refresh=1' : '');
+      const r = await fetch(url);
+      const data = await r.json();
+      _recommendData = data.recommendations || {};
+      const total = Object.values(_recommendData).reduce((s, arr) => s + arr.length, 0);
+      const products = Object.keys(_recommendData).length;
+      if (status) status.textContent = `제품 ${products}개 / 키워드 ${total}개`;
+      renderRecommendations();
+    } catch (e) {
+      if (status) status.textContent = '불러오기 실패: ' + e.message;
+    }
+  }
+
+  function reloadRecommendations() {
+    loadRecommendations(true);
+  }
+
+  function renderRecommendations() {
+    const currentOnly = document.getElementById('rec-current-only').checked;
+    const product = document.getElementById('product').value;
+    // 필터: 현재 제품만 vs 전체
+    let items = [];
+    if (currentOnly) {
+      items = _recommendData[product] || [];
+    } else {
+      Object.values(_recommendData).forEach(arr => items.push(...arr));
+    }
+    // 우선순위별 그룹
+    const groups = { 1: [], 2: [], 3: [] };
+    items.forEach(it => {
+      if (groups[it.priority]) groups[it.priority].push(it);
+    });
+    const titles = {
+      1: '🔴 1순위 — 순위 밖',
+      2: '🟠 2순위 — 연속일 20+ & 전환 0',
+      3: '⚪ 3순위 — 그 외',
+    };
+    [1, 2, 3].forEach(p => {
+      const el = document.getElementById('rec-priority-' + p);
+      const arr = groups[p];
+      const title = `<div class="rec-group-title">${titles[p]} (${arr.length}개)</div>`;
+      if (arr.length === 0) {
+        el.innerHTML = title + '<div class="rec-empty">해당 키워드가 없습니다.</div>';
+        return;
+      }
+      const chips = arr.map(it => {
+        const tip = `${it.rank ? '순위:' + it.rank : '순위 밖'} · 연속일:${it.series_days} · 전환:${it.conversion}`;
+        // data-* 로 키워드 보존 (특수문자 안전)
+        return `<span class="rec-chip" data-keyword="${escapeHtml(it.keyword)}" title="${escapeHtml(tip)}" onclick="addKeywordChip(this)">${escapeHtml(it.keyword)}</span>`;
+      }).join('');
+      el.innerHTML = title + chips;
+    });
+    updateChipAddedState();
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  // 현재 키워드 input 값 → 키워드 배열 (쉼표 분리, 공백 트림)
+  function _currentKeywords() {
+    const v = document.getElementById('keyword').value || '';
+    return v.split(',').map(s => s.trim()).filter(Boolean);
+  }
+
+  function addKeywordChip(el) {
+    const kw = el.getAttribute('data-keyword');
+    if (!kw) return;
+    const list = _currentKeywords();
+    if (list.includes(kw)) {
+      // 이미 추가됨 — 시각 표시만 갱신
+      updateChipAddedState();
+      return;
+    }
+    list.push(kw);
+    const input = document.getElementById('keyword');
+    input.value = list.join(', ');
+    // change 이벤트 직접 호출 (다른 핸들러도 함께 갱신)
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    updateChipAddedState();
+  }
+
+  // 현재 입력된 키워드와 일치하는 칩에 'added' 클래스 부여
+  function updateChipAddedState() {
+    const list = _currentKeywords();
+    document.querySelectorAll('.rec-chip').forEach(chip => {
+      const kw = chip.getAttribute('data-keyword');
+      if (list.includes(kw)) chip.classList.add('added');
+      else chip.classList.remove('added');
     });
   }
 
