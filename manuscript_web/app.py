@@ -189,6 +189,7 @@ def test_format_apply():
     # 파서 체인 + 줄 길이 정규화 (실제 /generate 흐름과 동일)
     import output_parser
     result = output_parser._em_dash_to_quote(raw)
+    result = output_parser._normalize_quotes_in_annotations(result)
     result = output_parser._split_sentences_after_period(result)
     result = output_parser._enforce_product_ingredient_format(result, product or None)
     result = normalize_text(result)
@@ -273,19 +274,37 @@ def test_hook():
         elif func == "split_sentences":
             result = output_parser._split_sentences_after_period(body)
         elif func == "parse_body":
-            # Phase E body 후처리 체인과 동일 순서
-            result = output_parser._split_sentences_after_period(body)
+            # Phase E body 후처리 체인과 동일 순서 (parse() L549~ 와 일치)
+            result = output_parser._em_dash_to_quote(body)
+            result = output_parser._normalize_quotes_in_annotations(result)
+            result = output_parser._split_sentences_after_period(result)
             result = output_parser._enforce_product_ingredient_format(result, product)
             result = output_parser._merge_same_target_annotations(result)
             result = output_parser._inject_keyword_target(result, keyword)
         elif func == "full_pipeline":
             # 실제 /generate 흐름 재현: parse 체인 + normalize_text(줄 길이 28자 정리)
             from docx_formatter import normalize_text
-            result = output_parser._split_sentences_after_period(body)
+            result = output_parser._em_dash_to_quote(body)
+            result = output_parser._normalize_quotes_in_annotations(result)
+            result = output_parser._split_sentences_after_period(result)
             result = output_parser._enforce_product_ingredient_format(result, product)
             result = output_parser._merge_same_target_annotations(result)
             result = output_parser._inject_keyword_target(result, keyword)
             result = normalize_text(result)
+        elif func == "parse_annotation":
+            # docx_formatter.parse_annotation 단건 검증 (v2.1.6~ 슬래시 분할 등)
+            from docx_formatter import parse_annotation as _pa
+            fmt = _pa(body)
+            result = {
+                "colored_words": fmt.get("colored_words", []),
+                "highlighted_words": [(w, str(c)) for w, c in fmt.get("highlighted_words", [])],
+                "bolded_words": fmt.get("bolded_words", []),
+                "underlined_words": fmt.get("underlined_words", []),
+                "target_words": fmt.get("target_words", []),
+                "full_text_color": fmt.get("full_text_color"),
+                "highlight": str(fmt.get("highlight")) if fmt.get("highlight") else None,
+                "bold": fmt.get("bold"),
+            }
         else:
             return jsonify({"error": f"unknown func: {func}"}), 400
     except Exception as e:
@@ -393,6 +412,104 @@ def generate():
             "writer": writer,
             "date": date_str,
             "model": model_key,
+        },
+    })
+
+
+@app.route("/raw_files", methods=["GET"])
+def raw_files():
+    """output 폴더의 *_raw.txt 파일 목록 (최신순) — 재처리 UI 용."""
+    out_dir = config.OUTPUT_DIR
+    files = []
+    try:
+        for fn in os.listdir(out_dir):
+            if not fn.endswith("_raw.txt"):
+                continue
+            path = os.path.join(out_dir, fn)
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            # 파일명 형식: {YYYYMMDD_HHMMSS}_{keyword}_raw.txt
+            m = re.match(r"^(\d{8}_\d{6})_(.+)_raw\.txt$", fn)
+            ts_disp = m.group(1) if m else ""
+            kw_guess = m.group(2) if m else ""
+            files.append({
+                "filename": fn,
+                "ts": ts_disp,
+                "keyword_guess": kw_guess,
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+            })
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
+    files.sort(key=lambda f: f["mtime"], reverse=True)
+    return jsonify({"files": files[:50]})  # 최신 50개만
+
+
+@app.route("/reprocess", methods=["POST"])
+def reprocess():
+    """기존 raw 파일을 LLM 호출 없이 다시 parse → 편집창에 표시.
+
+    /generate 와 같은 응답 형식. raw 파일은 새로 저장하지 않음.
+    """
+    if not _auth_check(request):
+        return jsonify({"error": "인증 실패"}), 403
+
+    data = request.get_json(force=True) or {}
+    filename = (data.get("filename") or "").strip()
+    keyword = (data.get("keyword") or "").strip()
+    product = (data.get("product") or "").strip()
+    link = (data.get("link") or "").strip()
+    writer = (data.get("writer") or "").strip()
+    nt_medium = (data.get("nt_medium") or "").strip()
+    date_str = (data.get("date") or "").strip()
+    model_key = (data.get("model") or "Opus").strip()
+
+    if not filename:
+        return jsonify({"error": "filename 필수"}), 400
+    # 보안: 경로 분리자/상위 이동 금지
+    if "/" in filename or "\\" in filename or ".." in filename:
+        return jsonify({"error": "잘못된 파일명"}), 400
+    if not filename.endswith("_raw.txt"):
+        return jsonify({"error": "raw 파일이 아님"}), 400
+
+    raw_path = os.path.join(config.OUTPUT_DIR, filename)
+    if not os.path.isfile(raw_path):
+        return jsonify({"error": f"파일 없음: {filename}"}), 404
+
+    try:
+        with open(raw_path, "r", encoding="utf-8") as f:
+            raw_text = f.read()
+    except OSError as e:
+        return jsonify({"error": f"파일 읽기 실패: {e}"}), 500
+
+    # 파일명에서 keyword 추출 (요청에 없으면)
+    if not keyword:
+        m = re.match(r"^\d{8}_\d{6}_(.+)_raw\.txt$", filename)
+        if m:
+            keyword = m.group(1)
+
+    parsed = parse(raw_text, product=product or None, keyword=keyword or None)
+    normalized_body = normalize_text(parsed["body"])
+
+    return jsonify({
+        "title": parsed["title"],
+        "body": normalized_body,
+        "char_count": parsed["char_count"],
+        "style": parsed["style"],
+        "blocks_summary": parsed["blocks_summary"],
+        "review": parsed["review"],
+        "phases": parsed["phases"],
+        "usage": {"actual_model": "(재처리 — LLM 호출 없음)"},
+        "meta": {
+            "keyword": keyword,
+            "product": product,
+            "link": link,
+            "writer": writer,
+            "date": date_str,
+            "model": model_key,
+            "reprocessed_from": filename,
         },
     })
 

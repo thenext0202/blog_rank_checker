@@ -497,6 +497,23 @@
       <button class="btn btn-primary" id="btn-generate" onclick="generate()">원고 생성</button>
       <button class="btn btn-secondary" id="btn-reset" onclick="resetForm()">초기화</button>
     </div>
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;">
+      <button class="btn btn-secondary" id="btn-reprocess" onclick="openReprocess()" style="font-size:13px;padding:8px 14px;">
+        🔄 raw 파일에서 재처리 (LLM 호출 X)
+      </button>
+      <span style="font-size:11px;color:var(--text-muted);">서식 엔진 수정 후 같은 원고 다시 보기</span>
+    </div>
+    <div id="reprocess-panel" style="display:none;margin-top:10px;padding:12px;background:#f1f5f9;border:1px solid var(--border);border-radius:6px;">
+      <div style="font-size:13px;font-weight:600;margin-bottom:6px;">raw 파일 선택 (최신 50개)</div>
+      <select id="reprocess-file" style="width:100%;padding:6px;font-size:12px;font-family:ui-monospace,Consolas,monospace;"></select>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">
+        키워드는 파일명에서 자동 추출. 제품명/링크는 위 폼 값을 사용 (제품 링크는 빈 값이어도 동작).
+      </div>
+      <div style="margin-top:10px;display:flex;gap:6px;">
+        <button class="btn btn-primary" onclick="doReprocess()" style="font-size:12px;padding:6px 12px;">선택한 파일 재처리</button>
+        <button class="btn btn-secondary" onclick="closeReprocess()" style="font-size:12px;padding:6px 12px;">닫기</button>
+      </div>
+    </div>
     <div style="font-size:12px;color:var(--text-muted);margin-top:8px;line-height:1.5;">
       원고 생성 → 우측에서 편집 → <b>"시트에 기입"</b> 버튼으로 최종본 저장
     </div>
@@ -743,6 +760,107 @@
 
     linkEl.value = `${info.base_link}?${params.join('&')}`;
     badge.style.display = '';  // 배지 다시 보이기
+  }
+
+  // ── 응답 → 편집창 주입 (generate / reprocess 공용) ──
+  function applyManuscriptResponse(data) {
+    lastResult = data;
+    document.getElementById('title-input').value = data.title || '';
+    document.getElementById('body-input').value = data.body || '';
+    document.getElementById('char-count').textContent = `${(data.char_count || 0).toLocaleString()}자`;
+    if (typeof updateKeywordCount === 'function') updateKeywordCount();
+    if (typeof refreshPreview === 'function') refreshPreview();
+
+    const a = data.phases || {};
+    const analysis = [
+      "● Phase A — 페르소나 분석\n" + (a.A || ""),
+      "● Phase B — 블록 구성\n" + (a.B || ""),
+      "● Phase B-2 — 심의·논문 사전 준비\n" + (a["B-2"] || ""),
+      "● Phase D — 심의 검수\n" + (a.D || ""),
+    ].join("\n\n");
+    document.getElementById('analysis-text').textContent = analysis;
+
+    document.getElementById('meta-bar').classList.add('visible');
+    document.getElementById('meta-chars').textContent = `${(data.char_count || 0).toLocaleString()}자`;
+    document.getElementById('meta-style').textContent = data.style ? `스타일: ${data.style}` : '스타일: 미판정';
+
+    const u = data.usage || {};
+    const cacheRead = u.cache_read_input_tokens || 0;
+    const cacheCreate = u.cache_creation_input_tokens || 0;
+    const cacheMsg = (data.meta && data.meta.reprocessed_from)
+      ? `재처리 (LLM 호출 없음 — ${data.meta.reprocessed_from})`
+      : (cacheRead
+          ? `캐시 읽기 ${cacheRead.toLocaleString()} (-90%)`
+          : `캐시 생성 ${cacheCreate.toLocaleString()} (다음부터 할인)`);
+    document.getElementById('meta-cache').textContent = cacheMsg;
+    document.getElementById('meta-model').textContent = `실제 모델: ${u.actual_model || '-'}`;
+    document.getElementById('meta-sheet').style.display = 'none';
+
+    const sheetBtn = document.getElementById('btn-write-sheet');
+    sheetBtn.disabled = false;
+    sheetBtn.classList.remove('done');
+    sheetBtn.textContent = '시트에 기입';
+  }
+
+  // ── raw 재처리 (LLM 호출 X) ──
+  async function openReprocess() {
+    const panel = document.getElementById('reprocess-panel');
+    const sel = document.getElementById('reprocess-file');
+    panel.style.display = 'block';
+    sel.innerHTML = '<option>로딩 중…</option>';
+    try {
+      const res = await fetch('/raw_files');
+      const data = await res.json();
+      if (!res.ok) { sel.innerHTML = `<option>오류: ${data.error || res.status}</option>`; return; }
+      if (!data.files || !data.files.length) {
+        sel.innerHTML = '<option>raw 파일이 없습니다</option>';
+        return;
+      }
+      sel.innerHTML = data.files.map(f => {
+        const ts = f.ts.replace(/_/g, ' ');
+        const kb = (f.size / 1024).toFixed(1);
+        return `<option value="${f.filename}">${ts} — ${f.keyword_guess} (${kb}KB)</option>`;
+      }).join('');
+    } catch (e) {
+      sel.innerHTML = `<option>네트워크 오류: ${e.message}</option>`;
+    }
+  }
+
+  function closeReprocess() {
+    document.getElementById('reprocess-panel').style.display = 'none';
+  }
+
+  async function doReprocess() {
+    const sel = document.getElementById('reprocess-file');
+    const filename = sel.value;
+    if (!filename || filename.startsWith('로딩') || filename.startsWith('오류') || filename.startsWith('raw 파일')) return;
+
+    const product = document.getElementById('product').value;
+    const keyword = document.getElementById('keyword').value.trim();
+    const link = document.getElementById('link').value.trim();
+    const writer = document.getElementById('writer').value.trim();
+    const ntMedium = document.getElementById('nt_medium').value.trim();
+    const date = document.getElementById('pub-date').value;
+    const model = document.getElementById('model').value;
+
+    showLoading(true); hideStatus();
+    try {
+      const res = await fetch('/reprocess', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename, product, keyword, link, writer, nt_medium: ntMedium, date, model }),
+      });
+      const data = await res.json();
+      if (!res.ok) { showStatus(data.error || '재처리 실패', 'error'); return; }
+      applyManuscriptResponse(data);
+      showStatus(`재처리 완료 — ${filename}`, 'success');
+      switchTab('manuscript');
+      closeReprocess();
+    } catch (e) {
+      showStatus('재처리 요청 실패: ' + e.message, 'error');
+    } finally {
+      showLoading(false);
+    }
   }
 
   // ── 원고 생성 ──

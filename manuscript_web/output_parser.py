@@ -114,7 +114,11 @@ def _is_bold_only_specs(specs):
 def _is_merge_candidate_annotation(line):
     """ㄴ 라인이 '타겟 기준 병합' 대상인지 판정.
 
-    병합 제외: 링크 도구 지시, 서식 키워드 없는 평문.
+    병합 제외:
+    - 링크 도구 지시
+    - 서식 키워드 없는 평문
+    - 다중 인용부호 (`'A', 'B', 'C' 노란 형광펜`) — _parse_merge_annotation 이 첫 쌍만 target 으로 인식하고 나머지를 cleaning 단계에서 제거함
+    - 괄호 안 인용부호 (`하늘색 형광펜('단어')`) — 인용부호를 외부로 끌어내면 빈 괄호 잔재 + parse_annotation 의 괄호 패턴이 별도 처리하므로 병합 우회
     """
     s = line.strip()
     if not s.startswith("ㄴ"):
@@ -123,6 +127,15 @@ def _is_merge_candidate_annotation(line):
     if not inner:
         return False
     if re.search(r"링크\s*도구|도구로\s*(삽입|연결)", inner):
+        return False
+    # v2.1.6~: 다중 인용부호는 병합 대상 제외 (첫 인용부호만 target 으로 잡혀 나머지 손실)
+    quote_pairs = len(re.findall(r"""['"][^'"]+['"]""", inner))
+    if quote_pairs > 1:
+        return False
+    # v2.1.7~: 괄호 () 있으면 병합 제외 — `(단어 / 단어)`, `(단어, 단어)` 등 괄호 안
+    # 슬래시·콤마가 spec 구분자로 오인되어 ㄴ 라인이 잘림. parse_annotation 의 괄호 추출
+    # 로직(L215~)이 별도 처리하므로 병합 우회가 안전.
+    if '(' in inner and ')' in inner:
         return False
     return bool(_COLOR_NAMES_RE.search(inner) or _FMT_KEYWORDS_RE.search(inner))
 
@@ -248,18 +261,13 @@ def _merge_same_target_annotations(body):
 def _enforce_product_ingredient_format(body, product_name):
     """배합명·제품 성분의 첫 등장 라인에 단어별 타겟 ㄴ 주석 주입.
 
-    - 배합명(예: "블러디션 배합") → ㄴ 검정 형광펜, 볼드 — "배합명"
-    - 성분명(예: "홍국") → ㄴ 노란 형광펜, 볼드 — "성분명"
-    - 첫 등장만 주입. 이후 등장은 자동 주석 추가 안 함.
-    - 기존 ㄴ 블록에 이미 같은 (단어+색상) 조합이 있으면 중복 안 함.
-
-    이전 버전은 "성분 2개 이상 쉼표 라인 전체"를 **..**로 래핑 + ㄴ 노란 형광펜, 볼드를
-    달았다. 이 방식은 문장 전체에 색이 퍼지고, 부분 문자열 매칭으로 오탐 위험이 있었다.
-    새 버전은 단어 단위 타겟 주석만 붙여 해당 단어에만 강조가 적용되게 한다.
-    ★ 블로거 요청박스 내부는 건드리지 않는다.
+    v2.1.9~ 단순 모드: 비활성화 (단어 단위 자동 주입 → 단락 통째 색칠로 부작용 빈번).
+    필요 시 사용자가 편집창에서 직접 단어 강조.
     """
     if not body or not product_name:
         return body
+    return body  # v2.1.9: 자동 주입 끔
+    # ↓ 이하 코드는 비활성화 (return 으로 도달 안 함)
     import config  # 순환 임포트 회피 위해 함수 내부 임포트
 
     # (단어, 색상) 타겟 수집
@@ -378,18 +386,63 @@ def _em_dash_to_quote(body):
     return "\n".join(lines)
 
 
-def _inject_keyword_target(body, keyword):
-    """하늘/노란/검정 형광펜 ㄴ 라인에 타겟이 빠져 있으면 keyword를 단일따옴표로 주입.
+def _normalize_quotes_in_annotations(body):
+    """ㄴ 라인 안의 큰따옴표 `"…"` 를 작은따옴표 `'…'` 로 통일 (v2.1.6~).
 
-    표준(ANNOTATION_STANDARD.md): `ㄴ '단어' 서식명`
-    - 이미 `'단어'` 타겟이 있으면 스킵
-    - 타겟 없고 위 본문에 keyword 있으면 `ㄴ 'keyword' 서식명`으로 주입
+    docx_formatter.parse_annotation 의 단어 추출 정규식 4종(colored/highlighted/
+    bolded/underlined_words)이 모두 작은따옴표 전제이므로, 큰따옴표로 들어온 LLM
+    지시(예: `ㄴ "단어" 빨간색, 볼드`, `ㄴ "단어1", "단어2" 노란 형광펜, 볼드`,
+    `ㄴ 하늘색 형광펜("키워드")`)는 매칭 자체가 안 돼 평문으로 출력됐다.
+    이 함수는 ㄴ 라인 한정으로 큰따옴표를 작은따옴표로 변환해 단일 표준으로 수렴.
+
+    - 본문 라인은 건드리지 않음 (인용 부호 그대로 보존).
+    - 큰따옴표 안에 작은따옴표가 들어있는 매치는 skip — 따옴표 중첩 충돌 방지.
+    - 호출 순서: `_em_dash_to_quote` 다음, `_inject_keyword_target` 이전.
     """
     if not body:
         return body
-    kw = (keyword or "").strip()
-    if not kw:
+    lines = body.split("\n")
+    for i, line in enumerate(lines):
+        s = line.lstrip()
+        if not s.startswith("ㄴ"):
+            continue
+        # 매치 단위 변환 — 내용에 작은따옴표 있으면 그 매치만 skip
+        def _conv(m):
+            inner = m.group(1)
+            if "'" in inner:
+                return m.group(0)
+            return f"'{inner}'"
+        lines[i] = re.sub(r'"([^"]+)"', _conv, line)
+    return "\n".join(lines)
+
+
+def _strip_keyword_highlight_annotations(body):
+    """v2.1.9~: 키워드 강조용 ㄴ 라인 자동 삭제.
+
+    이 프로그램 컨벤션상 '하늘색 형광펜'은 키워드(예: '중성지방관리') 강조 전용.
+    사용자 결정으로 키워드 색칠 자체를 끄기로 함 → LLM이 출력해도 후처리에서 라인 제거.
+    필요 시 사용자가 편집창에서 다른 색으로 직접.
+    """
+    if not body:
         return body
+    lines = body.split("\n")
+    out = []
+    for line in lines:
+        s = line.strip()
+        if s.startswith("ㄴ") and re.search(r"하늘\s*(?:색)?\s*형광펜", s):
+            continue  # drop
+        out.append(line)
+    return "\n".join(out)
+
+
+def _inject_keyword_target(body, keyword):
+    """v2.1.9~ 단순 모드: 비활성화 (키워드 자동 단어 주입 → 단락 통째 색칠로 부작용 빈번).
+    LLM이 ㄴ 라인에 단어 명시 안 하면 그대로 단락 통째 적용. 필요 시 사용자가 편집창에서.
+    """
+    if not body:
+        return body
+    return body  # v2.1.9: 자동 주입 끔
+    # ↓ 이하 코드는 비활성화
     lines = body.split("\n")
     hl_re = re.compile(r"(하늘|노란|검정|검은)\s*색?\s*형광펜")
     for i, line in enumerate(lines):
@@ -401,6 +454,11 @@ def _inject_keyword_target(body, keyword):
             continue
         # 이미 단일따옴표 타겟이 있으면 스킵
         if re.match(r"""^['"][^'"]+['"]\s+""", inner):
+            continue
+        # v2.1.7~: 키워드가 이미 ㄴ 라인 안 어딘가에(괄호 등 포함) 있으면 중복 주입 스킵
+        # — 안 막으면 `'kw' ... (kw)` 로 작은따옴표+괄호 둘 다 등록되어 경로 A 진입,
+        #   경로 A는 highlighted_words 미처리이므로 단어가 볼드만 되고 형광펜이 빠짐.
+        if kw in inner:
             continue
         # 위 본문에 keyword 있을 때만 주입
         prev_idx = i - 1
@@ -554,6 +612,9 @@ def parse(text, product=None, keyword=None):
         body = _strip_phase_e_checklist(body)
         # 레거시 em-dash 타겟(`— "단어"`) → 표준 단일따옴표 형식으로 정규화 (v2.1~)
         body = _em_dash_to_quote(body)
+        # ㄴ 라인 안의 큰따옴표 → 작은따옴표 일괄 통일 (v2.1.6~) — 4종 단어 추출 정규식이 작은따옴표 전제
+        body = _normalize_quotes_in_annotations(body)
+        body = _strip_keyword_highlight_annotations(body)
         # 쪼개기는 주석 주입 전에 — 라인 경계가 먼저 확정돼야 타겟 주석이 올바른 줄에 붙음
         body = _split_sentences_after_period(body)
         body = _enforce_product_ingredient_format(body, product)
@@ -566,6 +627,8 @@ def parse(text, product=None, keyword=None):
         title, body = extract_title_body(phase_c)
         body = _strip_phase_e_checklist(body)
         body = _em_dash_to_quote(body)
+        body = _normalize_quotes_in_annotations(body)
+        body = _strip_keyword_highlight_annotations(body)
         body = _split_sentences_after_period(body)
         body = _enforce_product_ingredient_format(body, product)
         # _merge_same_target_annotations 는 docx_formatter._build_document 에서 한 번만 실행 (v2.1~)

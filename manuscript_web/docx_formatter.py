@@ -6,6 +6,24 @@ import re
 # ║  서식 파싱 (ㄴ 지시 → 서식 딕셔너리)                          ║
 # ╚══════════════════════════════════════════════════════════════╝
 
+
+def _split_slash(word):
+    """v2.1.6~: 타겟 단어가 `/` 로 구분된 여러 조각이면 분할.
+
+    LLM이 `ㄴ "문장1 / 문장2 / 문장3" 빨간색, 볼드` 식으로 한 ㄴ 안에 여러 조각을
+    슬래시로 나열하는 경우, 통째로 매칭하면 본문(줄바꿈으로 쪼개진 상태)에서
+    절대 매칭 안 됨. 조각 단위로 분리해 각각 별도 타겟으로 등록한다.
+
+    `.strip('*')` — `'**단어**'` 마크다운 껍질도 함께 제거.
+    """
+    raw = (word or "").strip().strip('*').strip()
+    if not raw:
+        return []
+    if '/' not in raw:
+        return [raw]
+    return [p.strip().strip('*').strip() for p in raw.split('/') if p.strip()]
+
+
 def parse_annotation(annotation_text):
     """ㄴ 서식 지시 줄 → 서식 딕셔너리
     예: 'ㄴ 글자 크기 16, 글꼴 두껍게, 노란 형광펜'
@@ -56,10 +74,12 @@ def parse_annotation(annotation_text):
     # (본문 visible_text에는 `**` 가 없어서 껍질 붙은 채로는 단어 매칭 실패)
     for m in re.finditer(r"((?:'[^']+'\s*[가-힣]*\s*,?\s*)+)\s*(?:글꼴\s*두껍게|두껍게|볼드|bold)", text, re.IGNORECASE):
         for w in re.findall(r"'([^']+)'", m.group(1)):
-            fmt.setdefault('bolded_words', []).append(w.strip('*'))
+            for sub in _split_slash(w):
+                fmt.setdefault('bolded_words', []).append(sub)
     for m in re.finditer(r"((?:'[^']+'\s*[가-힣]*\s*,?\s*)+)\s*(?:밑줄|underline)", text, re.IGNORECASE):
         for w in re.findall(r"'([^']+)'", m.group(1)):
-            fmt.setdefault('underlined_words', []).append(w.strip('*'))
+            for sub in _split_slash(w):
+                fmt.setdefault('underlined_words', []).append(sub)
 
     # 볼드 — '글꼴 두껍게' / '두껍게' / '볼드' / 'bold' (앞에 '단어' 없는 경우만 문단 전체)
     _bold_m = re.search(r"(?<!['\"])\s*(글꼴\s*두껍게|두껍게|볼드|bold)", text, re.IGNORECASE)
@@ -102,7 +122,8 @@ def parse_annotation(annotation_text):
         # `.strip('*')` — `'**단어**'` 마크다운 껍질 제거 (본문 매칭 실패 방지)
         for m in re.finditer(rf"((?:'[^']+'\s*[가-힣]*\s*,?\s*)+)\s*{color_name}(?!\s*형광펜)", text):
             for w in re.findall(r"'([^']+)'", m.group(1)):
-                fmt['colored_words'].append((w.strip('*'), color_name))
+                for sub in _split_slash(w):
+                    fmt['colored_words'].append((sub, color_name))
 
     # 헥스 직접 지정: '빨간색(FF0000)', '파란색(0000FF)', '파란색(1155CC)' 등
     m = re.search(
@@ -155,7 +176,8 @@ def parse_annotation(annotation_text):
         # 여러 단어 그룹(`'A' 노란 형광펜, 'B' 노란 형광펜`)도 모두 수집
         for m in re.finditer(rf"((?:'[^']+'\s*[가-힣]*\s*,?\s*)+)\s*(?:{hl_pattern})색?\s*형광펜", text):
             for w in re.findall(r"'([^']+)'", m.group(1)):
-                fmt.setdefault('highlighted_words', []).append((w.strip('*'), hl_val))
+                for sub in _split_slash(w):
+                    fmt.setdefault('highlighted_words', []).append((sub, hl_val))
     for hl_pattern, hl_val in highlight_map.items():
         # 단어 추출 뒤에 남은 일반 형광펜 — 앞에 `'..'`가 없는 경우만
         m2 = re.search(rf"(?<!['\"])(?:{hl_pattern})색?\s*형광펜", text)
@@ -186,20 +208,71 @@ def parse_annotation(annotation_text):
         target_words_found.append(m.group(1))
     for m in re.finditer(r'"([^"]+)"\s*[—–\-]', text):
         target_words_found.append(m.group(1))
-    # 괄호 안 작은따옴표 단어도 타겟으로 인식 — LLM이 자주 쓰는 표기
-    # 예: "ㄴ 하늘색 형광펜 ('천연멜라토닌'만)" → target_words=['천연멜라토닌']
-    # 예: "('단어1', '단어2')" → ['단어1', '단어2']
+    # 괄호 안 단어 타겟 인식 — LLM이 자주 쓰는 표기
+    # 1) 따옴표 있는 케이스 (기존):
+    #    "ㄴ 하늘색 형광펜 ('천연멜라토닌'만)" → ['천연멜라토닌']
+    #    "('단어1', '단어2')" → ['단어1', '단어2']
+    # 2) v2.1.7~: 따옴표 없는 케이스 — `ㄴ 색상[형광펜], 볼드 (단어)` LLM 표기 흔함
+    #    "ㄴ 노란 형광펜, 볼드 (rTG 오메가3)" → ['rTG 오메가3']
+    #    "ㄴ 검정 형광펜, 볼드 (블러디션 배합)" → ['블러디션 배합']
+    #    "ㄴ 파란색, 볼드 (정상이 150 미만)" → ['정상이 150 미만']
+    #    inner에 메타 키워드(색상/형광펜/볼드/크기 등) 있으면 skip — 메타 자체를 단어로 오인 방지
     # 전체가 괄호인 경우는 위의 is_image_desc 경로에서 이미 return되어 여기 도달 못 함
+    _META_IN_PAREN = re.compile(
+        r'(빨간색|파란색|청록색|초록색|보라색|주황색|회색|하늘색|노란색|'
+        r'검정|검은|흰|볼드|bold|밑줄|underline|형광펜|두껍게|이탤릭|'
+        r'기울임|글자\s*크기|\d+\s*pt|인용구)',
+        re.IGNORECASE,
+    )
+    _paren_target_added = False  # v2.1.7.1: 괄호 추출로 단어가 등록됐는지 표시
     for m_paren in re.finditer(r'\(([^()]*)\)', text):
-        inner = m_paren.group(1)
-        for mw in re.finditer(r"'([^']+)'", inner):
-            target_words_found.append(mw.group(1))
-    # 중복 제거(순서 유지)
+        inner = m_paren.group(1).strip()
+        if not inner:
+            continue
+        # 따옴표(작은/큰) 있으면 그것만 등록
+        quoted = re.findall(r"""['"]([^'"]+)['"]""", inner)
+        if quoted:
+            for q in quoted:
+                target_words_found.append(q)
+            continue
+        # 따옴표 없는 — 메타 키워드 없을 때만 콤마 split 후 등록
+        if _META_IN_PAREN.search(inner):
+            continue
+        for piece in re.split(r'[,，]', inner):
+            p = piece.strip().strip('*').strip()
+            if p:
+                target_words_found.append(p)
+                _paren_target_added = True
+    # 중복 제거(순서 유지) — 슬래시 분할 후 등록
     seen = set()
     for w in target_words_found:
-        if w not in seen:
-            fmt['target_words'].append(w)
-            seen.add(w)
+        for sub in _split_slash(w):
+            if sub and sub not in seen:
+                fmt['target_words'].append(sub)
+                seen.add(sub)
+
+    # v2.1.9~: 단순 모드 — 단어 단위 자동 색칠 비활성화.
+    # LLM 출력의 단어 표기 모호성으로 단어 의도를 정규식 후처리로 추측하다 6회 회귀 발생.
+    # 단어 단위 정보(colored_words/highlighted_words/bolded_words/underlined_words/target_words)를
+    # 단락 단위(full_text_color/highlight/bold/underline)로 승격하고 단어 정보는 비움.
+    # → _apply_formatting_to_para 가 항상 경로 B (단락 통째 적용) 로 동작 = 케이스 분기 없음.
+    # 단어 단위 강조가 필요하면 사용자가 편집창에서 직접 (드래그+색 버튼).
+    # 본문 `**단어**` 마크다운은 그대로 작동 → ** 범위만 적용.
+    if fmt.get('colored_words'):
+        if not fmt.get('full_text_color') and not fmt.get('full_text_color_hex'):
+            fmt['full_text_color'] = fmt['colored_words'][0][1]
+        fmt['colored_words'] = []
+    if fmt.get('highlighted_words'):
+        if not fmt.get('highlight'):
+            fmt['highlight'] = fmt['highlighted_words'][0][1]
+        fmt['highlighted_words'] = []
+    if fmt.get('bolded_words'):
+        fmt['bold'] = True
+        fmt['bolded_words'] = []
+    if fmt.get('underlined_words'):
+        fmt['underline'] = True
+        fmt['underlined_words'] = []
+    fmt['target_words'] = []
 
     return fmt
 
@@ -458,6 +531,19 @@ def _apply_formatting_to_para(para, original_text, fmt):
     is_quote = bool(fmt.get('quote'))
     target_words = fmt.get('target_words') or []
 
+    # v2.1.7~: target_words 경로는 fmt['highlight']/fmt['full_text_color']만 단어에 적용.
+    # highlighted_words / colored_words 가 같이 채워진 경우 (예: `ㄴ '단어' 색 형광펜` 의
+    # 단어가 괄호 추출과 단일따옴표 추출 양쪽에 잡힘), 첫 번째 색을 효과 단락-단위 색으로 사용.
+    # — fmt 자체는 수정하지 않음. _build_document 의 has_para_only_fmt 체크가 이 승격에
+    #   영향받아 비매칭 라인까지 칠해지는 부작용 방지.
+    eff_highlight = fmt.get('highlight')
+    if not eff_highlight and fmt.get('highlighted_words'):
+        eff_highlight = fmt['highlighted_words'][0][1]
+    eff_full_color = fmt.get('full_text_color')
+    eff_full_color_hex = fmt.get('full_text_color_hex')
+    if not eff_full_color and not eff_full_color_hex and fmt.get('colored_words'):
+        eff_full_color = fmt['colored_words'][0][1]
+
     # ── target_words 경로: 해당 단어에만 서식 적용 ──
     if target_words and not is_quote:
         # 마크다운 ** .. ** / * .. * 를 파싱해 visible text와 char별 볼드/이탤릭 맵 구성
@@ -536,17 +622,17 @@ def _apply_formatting_to_para(para, original_text, fmt):
                 if fmt.get('underline'):
                     run.underline = True
                 has_color = False
-                if fmt.get('full_text_color_hex'):
-                    run.font.color.rgb = RGBColor.from_string(fmt['full_text_color_hex'])
+                if eff_full_color_hex:
+                    run.font.color.rgb = RGBColor.from_string(eff_full_color_hex)
                     has_color = True
-                elif fmt.get('full_text_color') and fmt['full_text_color'] in _color_map:
-                    run.font.color.rgb = _color_map[fmt['full_text_color']]
+                elif eff_full_color and eff_full_color in _color_map:
+                    run.font.color.rgb = _color_map[eff_full_color]
                     has_color = True
                 # 검정 형광펜 + 글자색 미지정 → 자동 흰 글자 (가독성 보정)
-                if fmt.get('highlight') == WD_COLOR_INDEX.BLACK and not has_color:
+                if eff_highlight == WD_COLOR_INDEX.BLACK and not has_color:
                     run.font.color.rgb = WHITE_C
-                if fmt.get('highlight'):
-                    run.font.highlight_color = fmt['highlight']
+                if eff_highlight:
+                    run.font.highlight_color = eff_highlight
             i = j
         return
 
@@ -585,15 +671,27 @@ def _apply_formatting_to_para(para, original_text, fmt):
 
         # 시각 서식(색/형광펜/밑줄) 적용 범위 결정
         # v2.1.4~: 명시적 visual 지시(색/형광펜/밑줄/세그먼트 색)는 **..** 범위 무관 항상 적용.
-        has_explicit_visual = (
-            seg_props.get('color')
-            or seg_props.get('highlight')
-            or fmt.get('full_text_color')
+        # v2.1.8~: 단, 단어 명시(colored_words/highlighted_words/bolded_words)가 하나도 없고
+        #   단락 단위 fmt(highlight/full_text_color)만 있고 본문에 ** 마크다운이 있으면
+        #   → ** 범위에만 적용. LLM이 `ㄴ 색 형광펜, 볼드` 만 달고 본문에 `**단어**` 로 단어를 표시한
+        #   케이스에서 문장 전체가 칠해지는 부작용 방지.
+        no_word_specs = (
+            not fmt.get('colored_words')
+            and not fmt.get('highlighted_words')
+            and not fmt.get('bolded_words')
+        )
+        has_seg_visual = bool(seg_props.get('color') or seg_props.get('highlight'))
+        has_para_visual = bool(
+            fmt.get('full_text_color')
             or fmt.get('full_text_color_hex')
             or fmt.get('highlight')
             or fmt.get('underline')
         )
-        apply_visual = (not has_md_bold_spans) or seg_props.get('bold') or bool(has_explicit_visual)
+        if has_md_bold_spans and no_word_specs and has_para_visual and not has_seg_visual:
+            # ** 범위에만 적용 (v2.1.4 이전 동작 복원, 단어 specs 없을 때 한정)
+            apply_visual = bool(seg_props.get('bold'))
+        else:
+            apply_visual = (not has_md_bold_spans) or seg_props.get('bold') or has_seg_visual or has_para_visual
 
         # 밑줄: 세그먼트 word_underline 우선, 그 외 fmt.underline은 underlined_words 없고 apply_visual 일 때
         if seg_props.get('word_underline'):
@@ -701,6 +799,29 @@ def _add_blogger_request_box(doc, lines):
 
 _NORM_MIN_LEN = 10
 _NORM_MAX_LEN = 28
+_NORM_MAX_LEN_LATIN = 40  # v2.1.10: 영문 우세 라인 한도 (한글의 약 1.5배)
+
+
+def _is_latin_dominant(s):
+    """라인이 영문/숫자/공백 위주인지 — 한글 char 비율 30% 미만."""
+    if not s:
+        return False
+    total = sum(1 for c in s if not c.isspace())
+    if total == 0:
+        return False
+    hangul = sum(1 for c in s if '가' <= c <= '힣')
+    return (hangul / total) < 0.30
+
+
+def _max_len_for(s):
+    return _NORM_MAX_LEN_LATIN if _is_latin_dominant(s) else _NORM_MAX_LEN
+
+
+_NORM_MIN_LEN_LATIN = 16  # v2.1.10: 영문 우세 라인 최소 (한글 10자와 시각 폭 비슷)
+
+
+def _min_len_for(s):
+    return _NORM_MIN_LEN_LATIN if _is_latin_dominant(s) else _NORM_MIN_LEN
 _NORM_GUARD_LEN = 5            # 의도적 짧은 줄 기준 (네?, 정말? 등)
 _NORM_ORPHAN_MIN = 8           # 분할 후 뒤조각이 이보다 짧으면 orphan — 분할 위치를 앞으로 당김
 _NORM_END_PUNCT = '.?!~…'      # 의도적 종결부호 — 마침표 포함: 문장 끝난 줄은 다음 줄과 합치지 않음
@@ -817,11 +938,12 @@ def _split_before_short(lines):
 
 
 def _split_long_lines(lines):
-    """28자 초과 줄을 연결어미 우선 기준으로 분할."""
+    """초과 줄을 연결어미 우선 기준으로 분할 (한글 28자 / 영문우세 40자 한도, v2.1.10)."""
     result = []
     for line in lines:
-        while len(line) > _NORM_MAX_LEN:
-            parts = _find_split_point(line)
+        max_len = _max_len_for(line)
+        while len(line) > max_len:
+            parts = _find_split_point(line, max_len=max_len)
             if not parts:
                 break
             result.append(parts[0])
@@ -831,28 +953,89 @@ def _split_long_lines(lines):
 
 
 def _merge_short_lines(lines):
-    """10자 미만 + 문장부호 없음 → 다음 줄과 합침 (28자 한도, 의도적 짧은 줄 보호)."""
+    """10자 미만 → 다음 줄과 무조건 합침 (v2.1.10: 한도 가드 풀림 — 사용자 결정).
+    의도적 짧은 줄 보호. 합쳐진 결과는 한글 28 / 영문우세 40 한도 내에서 우선 시도하지만,
+    초과해도 강행 (사용자: '윗 문장 한도 넘어도 한 문장 10자 이하 금지')."""
     result = []
     i = 0
     while i < len(lines):
         curr = lines[i]
         j = i + 1
-        while (len(curr) < _NORM_MIN_LEN
+        while (len(curr) < _min_len_for(curr)
                and not _ends_with_intentional_punct(curr)
                and j < len(lines)
-               and not _is_intentional_short(lines[j])
-               and len(curr) + 1 + len(lines[j]) <= _NORM_MAX_LEN):
+               and not _is_intentional_short(lines[j])):
             curr = curr + ' ' + lines[j]
             j += 1
         result.append(curr)
         i = j
-    return result
+    # v2.1.10: 결과에서 여전히 짧은 줄(마침표 끝남 가드 때문에 합쳐지지 않은 케이스)을
+    # 앞 줄에 흡수. 사용자 요구 "한 문장 최소 10자(영문 16자) 이상" 강제.
+    final = []
+    for ln in result:
+        if (final
+                and len(ln) < _min_len_for(ln)
+                and not _is_intentional_short(ln)):
+            final[-1] = final[-1].rstrip() + ' ' + ln
+        else:
+            final.append(ln)
+    return final
+
+
+def _absorb_short_label_paragraphs(text):
+    """v2.1.10: 짧은 `**라벨**` 단독 단락(예: '**홍국**', '**블러디션 배합**')이
+    빈 줄로 분리되어 있으면 위 단락 마지막 줄 끝에 흡수.
+
+    조건: 본문 한 줄, 형식 `**...**` 단독, 10자 미만 (한글 우세 기준).
+    위 단락이 본문(ㄴ/★/구분선/제목 아님)일 때만.
+    빈 줄 한 개를 흡수에 사용. 다음 ㄴ 라인은 그 자리 유지 → 합쳐진 단락에 ㄴ 적용,
+    `**` 마크다운 부분만 색칠 (v2.1.9 경로 B 동작).
+    """
+    if not text:
+        return text
+    label_pat = re.compile(r'^\s*\*\*[^*]+\*\*\s*$')
+    lines = text.split('\n')
+    out = list(lines)
+    in_box = False
+    for i in range(1, len(out)):
+        s = (out[i] or '').strip()
+        if '★' in s:
+            in_box = True; continue
+        if in_box:
+            if _SEPARATOR_RE.match(s):
+                in_box = False
+            continue
+        if not label_pat.match(s):
+            continue
+        if len(s) >= _NORM_MIN_LEN:  # 10자 이상이면 그대로
+            continue
+        # 위가 빈 줄이어야 흡수 (본문 한가운데 라벨은 건드리지 않음)
+        if i == 0 or (out[i-1] or '').strip():
+            continue
+        # 그 위 본문 라인 찾기 (빈 줄 건너)
+        k = i - 2
+        while k >= 0 and not (out[k] or '').strip():
+            k -= 1
+        if k < 0:
+            continue
+        prev = out[k].strip()
+        # 위가 본문(ㄴ/★/구분선/제목/헤딩 아님) 일 때만
+        if (prev.startswith('ㄴ') or '★' in prev or _SEPARATOR_RE.match(prev)
+                or re.match(r'^#{1,6}\s', prev) or re.match(r'^제목\s*[:：]', prev)):
+            continue
+        # 흡수: 위 본문 끝에 라벨 붙이고, 라벨 라인 + 그 위 빈 줄 제거
+        out[k] = out[k].rstrip() + ' ' + s
+        out[i] = ''         # 라벨 라인 비움
+        out[i-1] = None     # 빈 줄 마커 — 아래에서 None 라인 제거
+    return '\n'.join(ln for ln in out if ln is not None)
 
 
 def _normalize_line_lengths(text):
     """블록 경계를 보존하며 각 블록 내에서 긴 줄 분할 + 짧은 줄 합침 적용.
     ★ 블로거 요청사항 박스 내부는 통째로 건드리지 않음.
+    v2.1.10: 짧은 `**라벨**` 단독 단락은 위 단락에 미리 흡수 (10자 미만 금지).
     """
+    text = _absorb_short_label_paragraphs(text)
     lines = text.split('\n')
     result = []
     block = []
@@ -891,24 +1074,28 @@ def _normalize_line_lengths(text):
     return '\n'.join(result)
 
 
+def _ann_color_signature(line):
+    """ㄴ 라인의 색·형광펜·인용구 시그니처 추출 — 합쳐도 안전한지 판정용 (v2.1.8).
+
+    같은 시그니처 ㄴ 끼리만 lift/합치기. 다른 색·다른 형광펜이면 별도 라인 유지.
+    그래야 합쳐진 라벨이 parse_annotation 에서 단어 색을 뒤섞지 않음.
+    """
+    s = (line or '').lstrip('ㄴ').strip()
+    # 형광펜 (색 + 형광펜 키워드)
+    hl = tuple(sorted(set(re.findall(
+        r'(노란|노랑|검정|검은|하늘|파란|파랑|빨간|빨강|초록|청록)\s*(?:색)?\s*형광펜', s))))
+    # 색상 (형광펜 아닌 단독 색)
+    s_no_hl = re.sub(r'(노란|노랑|검정|검은|하늘|파란|파랑|빨간|빨강|초록|청록)\s*(?:색)?\s*형광펜', '', s)
+    colors = tuple(sorted(set(re.findall(
+        r'(빨간색|파란색|청록색|초록색|보라색|주황색|회색|하늘색|노란색)', s_no_hl))))
+    quote = bool(re.search(r'인용구', s))
+    return (hl, colors, quote)
+
+
 def _lift_mid_paragraph_annotations(text):
-    """문단(빈 줄·★박스로 둘러싸인 연속 본문) 중간에 끼인 ㄴ 주석을 문단 끝으로 이동.
-
-    예) 입력:
-        문장A
-        ㄴ '단어' 파란색
-        문장B
-        문장C
-        ㄴ 빨간색
-    → 출력:
-        문장A
-        문장B
-        문장C
-        ㄴ '단어' 파란색
-        ㄴ 빨간색
-
-    이후 단계의 `_merged`가 ㄴ 블록을 한 줄로 병합 → parse_annotation 한 번에 모든 서식 취합.
-    같은 para에 서식이 2번 apply되어 첫 번째가 날아가던 문제 방지.
+    """문단 중간에 끼인 ㄴ 주석을 문단 끝으로 이동.
+    v2.1.8~: 단락 내 ㄴ 들이 모두 같은 색 시그니처일 때만 lift. 다른 색이면 자리 유지
+    (각 ㄴ이 자기 바로 위 본문만 잡도록 — 합쳐서 색 섞이는 부작용 방지).
     """
     if not text:
         return text
@@ -919,41 +1106,41 @@ def _lift_mid_paragraph_annotations(text):
     while i < len(lines):
         line = lines[i]
         s = line.strip()
-        # ★ 박스 진입·내부 그대로 유지
         if '★' in s:
             in_box = True
-            out.append(line)
-            i += 1
-            continue
+            out.append(line); i += 1; continue
         if in_box:
             out.append(line)
             if _SEPARATOR_RE.match(s):
                 in_box = False
-            i += 1
-            continue
-        # 본문 라인이 시작되면 문단 수집 (빈 줄 또는 ★ 만나면 끝)
+            i += 1; continue
         if s and not s.startswith('ㄴ'):
-            bodies = []
-            anns = []
+            # 단락 수집
+            block = []  # 원본 라인 그대로
+            anns_only = []
             j = i
             while j < len(lines):
                 t = lines[j]
                 ts = t.strip()
-                if not ts:
+                if not ts or '★' in ts:
                     break
-                if '★' in ts:
-                    break
+                block.append(t)
                 if ts.startswith('ㄴ'):
-                    anns.append(t)
-                else:
-                    bodies.append(t)
+                    anns_only.append(t)
                 j += 1
-            out.extend(bodies)
-            out.extend(anns)
+            # ㄴ 들의 시그니처가 모두 같은가?
+            sigs = {_ann_color_signature(a) for a in anns_only}
+            if len(anns_only) >= 2 and len(sigs) == 1:
+                # 같은 색 → lift (본문 먼저, ㄴ 끝으로)
+                bodies = [b for b in block if not b.strip().startswith('ㄴ')]
+                out.extend(bodies)
+                out.extend(anns_only)
+            else:
+                # 다른 색 또는 ㄴ 1개 이하 → 원본 순서 유지
+                out.extend(block)
             i = j
         else:
-            out.append(line)
-            i += 1
+            out.append(line); i += 1
     return '\n'.join(out)
 
 
@@ -1049,6 +1236,7 @@ def _build_document(text, normalize=True):
             continue
         if _s.startswith('ㄴ') and _is_format_annotation(_s):
             _combined = _s
+            _cur_sig = _ann_color_signature(_s)
             _j = _i + 1
             while _j < len(lines):
                 _nxt = lines[_j].strip()
@@ -1056,6 +1244,10 @@ def _build_document(text, normalize=True):
                     _j += 1  # 병합 대상에서 제외, 라인 자체도 drop
                     continue
                 if _nxt.startswith('ㄴ') and _is_format_annotation(_nxt):
+                    # v2.1.8~: 같은 색 시그니처일 때만 합침. 다른 색이면 별도 라인 유지
+                    # (parse_annotation 한 번에 여러 색이 섞여 본문에 색이 새는 부작용 방지)
+                    if _ann_color_signature(_nxt) != _cur_sig:
+                        break
                     _combined = _combined + ', ' + _nxt.lstrip('ㄴ').strip()
                     _j += 1
                 else:
@@ -1101,6 +1293,15 @@ def _build_document(text, normalize=True):
         if not stripped:
             p = doc.add_paragraph('')
             recent.append((p, ''))
+            continue
+
+        # ── 제목 라인 (Phase E body 첫 머리에 남는 "제목 : ..." 라벨) ──
+        # v2.1.6~: 라벨로만 표시하고 단어별 서식 매칭 대상에서 제외.
+        # recent에 등록하지 않으면 후속 ㄴ 주석의 search_words / content_group 수집에서
+        # 자연스럽게 빠짐 → 키워드 형광펜이 제목 라인 대신 본문 첫 라인에 적용됨.
+        if re.match(r'^\*{0,2}\s*제목\s*\*{0,2}\s*[:：]', stripped):
+            p = doc.add_paragraph()
+            _add_text_runs(p, stripped)
             continue
 
         # ── 본문 중간에 ㄴ 서식이 섞인 경우 ──

@@ -2,7 +2,7 @@
 import os
 import sys
 
-VERSION = "1.2"
+VERSION = "2.1.10"
 
 # 지침 폴더 기본 경로 (manuscript_web/지침 모음/ 내부의 6개 모듈 MD)
 DEFAULT_INSTRUCTIONS_DIR = os.path.join(
