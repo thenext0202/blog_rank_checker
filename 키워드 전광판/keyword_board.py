@@ -26,6 +26,7 @@ import os
 import json
 import base64
 import urllib.parse
+import urllib.request
 import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -53,7 +54,93 @@ SHEET_PUBLIST2 = "내부 발행리스트"
 CRED_FILE      = "../manuscript_generator/credentials.json"
 BLOG_TOP_N     = 5   # 블로그탭 상위 N위까지 체크
 WORKERS        = 2   # 병렬 브라우저 수
+AREA_WORKERS   = 2   # 영역 판별 병렬 (네이버 403 차단 회피용으로 낮춤)
+AREA_DELAY     = 0.5 # 요청 간 간격 (초)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+# ━━━━━━━━━━━━━━━━━━━━ 네이버 영역 판별 (스마트블록/인기글/통합검색) ━━━━━━━━━━━━━━━━━━━━
+# keyword_research_assign/keyword_assign.py 의 검증된 패턴 이식
+GENERIC_SECTIONS = {
+    "브랜드 콘텐츠", "이미지", "뉴스", "동영상", "지식iN", "쇼핑",
+    "지도", "장소", "사전", "웹사이트", "카페", "학술정보",
+    "어학사전", "도서", "뮤직", "영화", "TV", "플레이스",
+}
+
+NAVER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+def _fetch_naver_html(keyword: str, timeout: int = 12) -> str:
+    """네이버 통합검색 HTML 가져오기 (브라우저 흉내 헤더)"""
+    q = urllib.parse.quote(keyword)
+    url = f"https://search.naver.com/search.naver?where=nexearch&query={q}"
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", NAVER_UA)
+    req.add_header(
+        "Accept",
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8",
+    )
+    req.add_header("Accept-Language", "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7")
+    req.add_header("Referer", "https://www.naver.com/")
+    req.add_header("Connection", "keep-alive")
+    req.add_header("Upgrade-Insecure-Requests", "1")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def detect_naver_area(keyword: str) -> str:
+    """네이버 통합검색에서 키워드가 어떤 영역에 노출되는지 판별.
+
+    반환:
+      "스마트블록" / "인기글" / "통합검색" / "스마트블록\n인기글" / "오류"
+    403/타임아웃은 3초 대기 후 1회 재시도.
+    """
+    last_err = None
+    for attempt in range(2):
+        try:
+            html = _fetch_naver_html(keyword)
+            subject_titles = re.findall(r'"subjectTitle":"([^"]+)"', html)
+
+            kw_norm = keyword.replace(" ", "").lower()
+            has_smart = False
+            has_popular = False
+
+            for t in subject_titles:
+                if t in GENERIC_SECTIONS:
+                    continue
+                if "인기글" in t:
+                    has_popular = True
+                    continue
+                if "FAQ" in t:
+                    continue
+                t_norm = t.replace(" ", "").lower()
+                if kw_norm in t_norm or any(
+                    part in t_norm for part in kw_norm.split() if len(part) >= 2
+                ):
+                    has_smart = True
+
+            labels = []
+            if has_smart:
+                labels.append("스마트블록")
+            if has_popular:
+                labels.append("인기글")
+            if not labels:
+                labels.append("통합검색")
+            return "\n".join(labels)
+
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                time.sleep(3)  # 일시 차단 회피
+                continue
+            break
+
+    print(f"    [영역 판별 오류] {keyword}: {last_err}")
+    return "오류"
 
 
 # ────────────────────────────────────────────────
@@ -333,18 +420,18 @@ def load_pub_links(spreadsheet):
 # ────────────────────────────────────────────────
 
 def roll_columns(ws, total_rows):
-    """D~J 열 데이터를 K~Q로 이동 후 D~J 초기화"""
+    """D~J 열 데이터를 L~R로 이동 후 D~J 초기화 (K열은 영역 컬럼이라 건너뜀)"""
     range_def = f"D1:J{total_rows}"
     old_data = ws.get(range_def)
 
     if not old_data:
         return
 
-    range_new = f"K1:Q{len(old_data)}"
+    range_new = f"L1:R{len(old_data)}"
     ws.update(values=old_data, range_name=range_new)
     ws.batch_clear([range_def])
 
-    print(f"    D~J -> K~Q 이동 완료 ({len(old_data)}행)")
+    print(f"    D~J -> L~R 이동 완료 ({len(old_data)}행)")
 
 
 # ────────────────────────────────────────────────
@@ -406,12 +493,12 @@ def main():
     else:
         print(f"\n[4] 오늘({today_str}) 이미 기록됨 - 덮어쓰기")
 
-    # D1에 오늘 날짜 + D2:J2 헤더 기입
+    # D1에 오늘 날짜 + D2:K2 헤더 기입 (K = 영역)
     ws_keyword.update(values=[[today_str]], range_name="D1")
-    headers = [["순위", "블로거명", "발행처", "링크", "발행일자", "연속일", "전환금액"]]
-    ws_keyword.update(values=headers, range_name="D2:J2")
+    headers = [["순위", "블로거명", "발행처", "링크", "발행일자", "연속일", "전환금액", "영역"]]
+    ws_keyword.update(values=headers, range_name="D2:K2")
 
-    # D2:J2 헤더 서식 (검정 배경 + 흰색 글씨)
+    # D2:K2 헤더 서식 (검정 배경 + 흰색 글씨)
     sheet_id = ws_keyword.id
     spreadsheet.batch_update({"requests": [
         {
@@ -421,7 +508,7 @@ def main():
                     "startRowIndex": 1,
                     "endRowIndex": 2,
                     "startColumnIndex": 3,
-                    "endColumnIndex": 10,
+                    "endColumnIndex": 11,
                 },
                 "cell": {
                     "userEnteredFormat": {
@@ -436,6 +523,44 @@ def main():
             }
         }
     ]})
+
+    # 4.5. 네이버 영역 판별 (B열 전체 키워드 -> K열 기입, 롤링 X)
+    print("\n[4.5] 네이버 영역 판별 중 (B열 전체 키워드)...")
+    area_targets = []
+    for idx, row in enumerate(kw_rows[2:], start=3):
+        keyword = cell(row, 1).strip()
+        if keyword:
+            area_targets.append((idx, keyword))
+
+    if limit:
+        area_targets = area_targets[:limit]
+
+    def check_area(row_idx, kw):
+        time.sleep(AREA_DELAY)  # 요청 간격 - 차단 회피
+        return row_idx, detect_naver_area(kw)
+
+    area_results = {}
+    if area_targets:
+        with ThreadPoolExecutor(max_workers=AREA_WORKERS) as executor:
+            futs = [executor.submit(check_area, i, k) for i, k in area_targets]
+            done = 0
+            for fut in as_completed(futs):
+                ri, area = fut.result()
+                area_results[ri] = area
+                done += 1
+                # 다중영역(줄바꿈)은 첫줄만 표시해 출력 깔끔
+                area_short = area.split("\n")[0] + ("+" if "\n" in area else "")
+                print(f"  [{done}/{len(area_targets)}] {area_short}")
+
+        area_updates = [
+            {"range": f"K{ri}", "values": [[area]]}
+            for ri, area in area_results.items()
+        ]
+        if area_updates:
+            ws_keyword.batch_update(area_updates)
+        print(f"    K열 영역 기입: {len(area_updates)}개")
+    else:
+        print("    대상 키워드 없음")
 
     # 5. 처리 대상 필터링 (제품 매칭)
     print("\n[5] 제품 매칭 필터링...")
