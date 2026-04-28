@@ -2,6 +2,7 @@
 원본: 블로그 mkt 링크 대조/blog_link_extractor.py → GUI 탭으로 변환
 """
 
+import html
 import os
 import re
 import threading
@@ -9,7 +10,7 @@ import time
 import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, ttk
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse, parse_qs
 
 import requests
 from selenium.webdriver.common.by import By
@@ -18,6 +19,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from shared.browser_manager import create_headless_driver
 from shared.gui_helpers import create_log_area
+from shared.sheets_client import normalize_sheet_id
 
 # ═══════════════════════════════════════════════════════
 #  MKT 링크 추출/검증 로직
@@ -51,55 +53,114 @@ def extract_mkt_links(driver, blog_url):
     time.sleep(1)
 
     mkt_links = []
-    seen = set()
 
-    # 1) DOM a 태그
-    selectors = [
-        "div.se-main-container a",
-        "div#postViewArea a",
-        "a.se-oglink-info",
-        "a.se-module-oglink",
-        "div.se-module-oglink a",
-        "a[data-linkdata]",
-        "div.se-section-oglink a",
-        "a.se-link",
+    # 1차: 카드 외곽 컨테이너 단위 — Naver SE는 카드가 3중 중첩이라
+    # 외곽(div.se-component.se-oglink)만 잡아야 카드 1개당 1번 처리됨
+    container_fallback_selectors = [
+        "div.se-component.se-oglink",   # 외곽 (대부분 케이스)
+        "div.se-section-oglink",        # 외곽 못 잡을 때 폴백
+        "div.se-module-oglink",         # 그것도 안되면 최종 폴백
     ]
-    for sel in selectors:
+    for sel in container_fallback_selectors:
         try:
-            for el in driver.find_elements(By.CSS_SELECTOR, sel):
-                href = el.get_attribute("href") or ""
-                _collect_mkt(href, mkt_links, seen)
+            containers = driver.find_elements(By.CSS_SELECTOR, sel)
         except Exception:
+            containers = []
+        if not containers:
             continue
 
-    # 2) data-linkdata 속성
-    try:
-        for el in driver.find_elements(By.CSS_SELECTOR, "[data-linkdata]"):
-            data = el.get_attribute("data-linkdata") or ""
-            for url in re.findall(r"https?://[^\s\"'<>\\,}]+", data):
-                _collect_mkt(url, mkt_links, seen)
-    except Exception:
-        pass
+        for container in containers:
+            # 컨테이너 안에서 첫 상품 URL 1개만 추출
+            url = None
+            try:
+                anchors = container.find_elements(By.CSS_SELECTOR, "a")
+            except Exception:
+                anchors = []
+            for a in anchors:
+                data = a.get_attribute("data-linkdata") or ""
+                if data:
+                    for u in re.findall(r"https?://[^\s\"'<>\\,}]+", data):
+                        cleaned = _clean_product_url(u)
+                        if cleaned:
+                            url = cleaned
+                            break
+                if not url:
+                    href = a.get_attribute("href") or ""
+                    url = _clean_product_url(href)
+                if url:
+                    break
 
-    # 3) 페이지 소스
-    try:
-        source = driver.page_source
-        for url in re.findall(
-            r'https?://mkt\.shopping\.naver\.com/link/[^\s"\'<>\\]+', source
-        ):
-            _collect_mkt(url, mkt_links, seen)
-    except Exception:
-        pass
+            if url:
+                mkt_links.append(url)
+        # 1개 셀렉터로 잡았으면 다음 셀렉터로 안 넘어감 (중첩 중복 방지)
+        break
+
+    # 2차 폴백: 카드 셀렉터로 못 잡았을 때만 — 광범위 셀렉터 + URL 중복 제거
+    if not mkt_links:
+        broad_selectors = [
+            "div.se-main-container a",
+            "div#postViewArea a",
+            "a.se-link",
+        ]
+        seen_urls = set()
+        for sel in broad_selectors:
+            try:
+                for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                    href = el.get_attribute("href") or ""
+                    cleaned = _clean_product_url(href)
+                    if cleaned and cleaned not in seen_urls:
+                        seen_urls.add(cleaned)
+                        mkt_links.append(cleaned)
+            except Exception:
+                continue
+
+    # 3차 폴백: DOM에서 전혀 못 잡으면 페이지 소스 정규식
+    if not mkt_links:
+        try:
+            source = driver.page_source
+            patterns = [
+                r'https?://mkt\.shopping\.naver\.com/link/[^\s"\'<>\\,}]+',
+                r'https?://brand\.naver\.com/[^/\s"\'<>\\]+/products/\d+[^\s"\'<>\\,}]*',
+                r'https?://smartstore\.naver\.com/[^/\s"\'<>\\]+/products/\d+[^\s"\'<>\\,}]*',
+            ]
+            seen_urls = set()
+            for pat in patterns:
+                for url in re.findall(pat, source):
+                    cleaned = _clean_product_url(url)
+                    if cleaned and cleaned not in seen_urls:
+                        seen_urls.add(cleaned)
+                        mkt_links.append(cleaned)
+        except Exception:
+            pass
 
     return mkt_links
 
 
-def _collect_mkt(href, mkt_links, seen):
+# 상품 링크로 인정되는 도메인
+PRODUCT_DOMAINS = (
+    "mkt.shopping.naver.com",
+    "brand.naver.com",
+    "smartstore.naver.com",
+)
+
+
+def _clean_product_url(href):
+    """URL 정제 — HTML 엔티티/URL 인코딩 풀고, 잡문자 제거, NaPm 추적값 제거.
+    상품 도메인이 아니면 빈 문자열 반환."""
+    if not href:
+        return ""
+    # HTML 엔티티 반복 디코딩 (이중 인코딩 대비: &amp;#38; → &#38; → &)
+    prev = None
+    while href != prev:
+        prev = href
+        href = html.unescape(href)
     href = unquote(href).strip()
-    if "mkt.shopping.naver.com" not in href:
-        return
-    clean = re.sub(r"[&?]NaPm=[^&]*", "", href)
-    mkt_links.append(clean)
+    # URL 끝 잡문자 제거 (따옴표·괄호·콤마 등 페이지 소스에서 따라옴)
+    href = re.split(r'[\s"\'<>\\,}]', href, maxsplit=1)[0]
+    if not any(d in href for d in PRODUCT_DOMAINS):
+        return ""
+    # NaPm(자동 추적값) 제거 — 매번 달라지는 값
+    return re.sub(r"[&?]NaPm=[^&]*", "", href)
 
 
 def resolve_mkt_link(mkt_url):
@@ -123,6 +184,7 @@ def resolve_mkt_link(mkt_url):
 
 
 def normalize_product_url(url):
+    """경로만 정규화 (쿼리 제거, scheme/www/m 제거)"""
     url = unquote(url).strip()
     url = re.sub(r"\?.*", "", url)
     url = re.sub(r"^https?://", "", url)
@@ -130,25 +192,60 @@ def normalize_product_url(url):
     return url.rstrip("/").lower()
 
 
+def _ensure_resolved(url):
+    """mkt 단축링크면 풀어서 최종 brand/smartstore URL 반환. 이미 직링크면 그대로."""
+    if not url:
+        return ""
+    if "mkt.shopping.naver.com/link/" in url:
+        resolved = resolve_mkt_link(url)
+        return resolved or url
+    return url
+
+
+def _extract_product_key(url):
+    """비교용 키 추출 — (정규화된 path, nt_keyword 값)"""
+    norm_path = normalize_product_url(url)
+    # nt_keyword 추출 (원본 url에서 — 정규화 전)
+    try:
+        qs = parse_qs(urlparse(url).query)
+        nt_keyword = unquote(qs.get("nt_keyword", [""])[0]).strip().lower()
+    except Exception:
+        nt_keyword = ""
+    return norm_path, nt_keyword
+
+
 def check_match(mkt_url, real_url):
     if not mkt_url or not real_url:
         return ""
-    resolved = resolve_mkt_link(mkt_url)
-    if not resolved:
+
+    # 양쪽 다 mkt 단축링크면 풀어서 직링크로 변환
+    resolved_mkt = _ensure_resolved(mkt_url)
+    resolved_real = _ensure_resolved(real_url)
+
+    if not resolved_mkt or not resolved_real:
         return "확인불가"
 
-    norm_resolved = normalize_product_url(resolved)
-    norm_real = normalize_product_url(real_url)
+    path_mkt, kw_mkt = _extract_product_key(resolved_mkt)
+    path_real, kw_real = _extract_product_key(resolved_real)
 
-    if norm_resolved == norm_real:
-        return "일치"
+    # path 비교 — 전체 경로 같거나, products/숫자 ID가 같으면 동일 상품
+    same_product = False
+    if path_mkt == path_real:
+        same_product = True
+    else:
+        m1 = re.search(r"products/(\d+)", path_mkt)
+        m2 = re.search(r"products/(\d+)", path_real)
+        if m1 and m2 and m1.group(1) == m2.group(1):
+            same_product = True
 
-    m1 = re.search(r"products/(\d+)", norm_resolved)
-    m2 = re.search(r"products/(\d+)", norm_real)
-    if m1 and m2 and m1.group(1) == m2.group(1):
-        return "일치"
+    if not same_product:
+        return "불일치"
 
-    return "불일치"
+    # 상품은 같음 → nt_keyword까지 비교
+    if kw_mkt != kw_real:
+        return "불일치"
+
+    return "일치"
 
 
 # ═══════════════════════════════════════════════════════
@@ -249,7 +346,7 @@ class LinkCheckerTab(ttk.Frame):
 
     def _load_sheet(self):
         """시트에서 데이터 불러오기"""
-        sheet_id = self.sheet_id_var.get().strip()
+        sheet_id = normalize_sheet_id(self.sheet_id_var.get())
         tab_name = self.tab_name_var.get().strip()
         if not sheet_id or not tab_name:
             messagebox.showwarning("경고", "시트 ID와 탭 이름을 입력하세요.")
@@ -309,7 +406,7 @@ class LinkCheckerTab(ttk.Frame):
 
     def _run_check(self):
         """백그라운드: MKT 링크 추출 + 검증"""
-        sheet_id = self.sheet_id_var.get().strip()
+        sheet_id = normalize_sheet_id(self.sheet_id_var.get())
         tab_name = self.tab_name_var.get().strip()
 
         self.log("브라우저 시작 중...")
