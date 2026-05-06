@@ -12,6 +12,9 @@ chrome_profile/
 # 블로그 콘텐츠 JSON은 추적
 !blog_content/*.json
 
+# 원고 이미지 프로그램_web 산출물 JSON 추적 (slot_metadata, slot_decision, *.meta.json)
+!원고 이미지 프로그램_web/output/*.json
+
 # 디버그/진단 스크립트
 debug_*.py
 diagnose*.py

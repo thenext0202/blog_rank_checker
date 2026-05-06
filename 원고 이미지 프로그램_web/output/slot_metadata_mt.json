@@ -1,0 +1,193 @@
+{
+  "manuscript": "manuscript_marked_mt.md",
+  "manuscript_metadata": {
+    "product": "멜라토닌",
+    "product_herb_keyword": "피스좀 멜라토닌",
+    "product_category": "일반",
+    "cover_image": "0_일반"
+  },
+  "slot_metadata": [
+    {
+      "slot": "001",
+      "scene": "새벽 3시에 깨어 천장을 보다가 핸드폰을 집어 들고 잠 못 이루는 모습",
+      "category": "신체증상",
+      "position_hint": "opening",
+      "mood": "지친",
+      "tags": [
+        "불면",
+        "새벽",
+        "핸드폰",
+        "수면",
+        "피로"
+      ]
+    },
+    {
+      "slot": "002",
+      "scene": "해외직구로 산 멜라토닌 5mg을 먹은 다음 날 띵한 머리로 출근하는 모습",
+      "category": "약",
+      "position_hint": "middle",
+      "mood": "후회스러운",
+      "tags": [
+        "멜라토닌",
+        "해외직구",
+        "5mg",
+        "부작용",
+        "출근"
+      ]
+    },
+    {
+      "slot": "003",
+      "scene": "약국 수면유도제도 비슷한 멍한 부작용을 겪고 내성을 걱정하는 모습",
+      "category": "약",
+      "position_hint": "middle",
+      "mood": "걱정스러운",
+      "tags": [
+        "수면유도제",
+        "약국",
+        "내성",
+        "부작용",
+        "고민"
+      ]
+    },
+    {
+      "slot": "004",
+      "scene": "멜라토닌이 본래 체내에서 만들어지는 호르몬이며 나이가 들수록 분비가 준다는 사실을 알게 되는 모습",
+      "category": "정보성",
+      "position_hint": "middle",
+      "mood": "흥미로운",
+      "tags": [
+        "천연 멜라토닌",
+        "호르몬",
+        "분비",
+        "나이",
+        "수면"
+      ]
+    },
+    {
+      "slot": "005",
+      "scene": "합성 멜라토닌 5mg이 과한 용량이라 아침 멍한 느낌의 원인이었음을 깨닫는 모습",
+      "category": "정보성",
+      "position_hint": "middle",
+      "mood": "깨달은",
+      "tags": [
+        "합성 멜라토닌",
+        "용량",
+        "과다 섭취",
+        "원인",
+        "이해"
+      ]
+    },
+    {
+      "slot": "006",
+      "scene": "저녁 7시 이후 카페인과 녹차, 야식을 끊으며 수면 습관을 점검하는 모습",
+      "category": "음식",
+      "position_hint": "middle",
+      "mood": "결연한",
+      "tags": [
+        "수면 습관",
+        "카페인",
+        "녹차",
+        "야식",
+        "관리"
+      ]
+    },
+    {
+      "slot": "007",
+      "scene": "자기 전 핸드폰을 줄이고 족욕과 스트레칭을 하다가 블로그 후기에서 식물 멜라토닌을 발견하는 모습",
+      "category": "후기",
+      "position_hint": "middle",
+      "mood": "고민하는",
+      "tags": [
+        "족욕",
+        "스트레칭",
+        "핸드폰",
+        "블로그",
+        "피스타치오"
+      ]
+    },
+    {
+      "slot": "008",
+      "scene": "피스좀 멜라토닌이라는 식물성 리포좀 제형 제품을 알게 되는 모습",
+      "category": "커뮤니티",
+      "position_hint": "middle",
+      "mood": "관심을 갖는",
+      "tags": [
+        "피스좀",
+        "리포좀",
+        "식물성",
+        "제형",
+        "발견"
+      ]
+    },
+    {
+      "slot": "009",
+      "scene": "피스타치오 추출물 멜라토닌 효능 관련 Pistacia vera Extract 논문을 살펴보는 모습",
+      "category": "논문",
+      "position_hint": "middle",
+      "mood": "신중한",
+      "tags": [
+        "피스타치오",
+        "추출물",
+        "멜라토닌",
+        "논문",
+        "2mg"
+      ]
+    },
+    {
+      "slot": "010",
+      "scene": "리포좀 제형이 일반 경구보다 생체이용률이 높다는 논문을 공부하는 모습",
+      "category": "논문",
+      "position_hint": "middle",
+      "mood": "신중한",
+      "tags": [
+        "리포좀",
+        "인지질",
+        "생체이용률",
+        "논문",
+        "흡수"
+      ]
+    },
+    {
+      "slot": "011",
+      "scene": "가바와 테아닌 배합의 NREM 수면 개선 논문을 살펴보는 모습",
+      "category": "논문",
+      "position_hint": "middle",
+      "mood": "흥미로운",
+      "tags": [
+        "가바",
+        "테아닌",
+        "이완",
+        "NREM",
+        "수면"
+      ]
+    },
+    {
+      "slot": "012",
+      "scene": "두 달간 챙긴 후 새벽 깸이 줄고 아침이 가벼워진 일상을 누리는 모습",
+      "category": "일상",
+      "position_hint": "middle",
+      "mood": "안도하는",
+      "tags": [
+        "두 달",
+        "새벽",
+        "변화",
+        "아침",
+        "수면"
+      ]
+    },
+    {
+      "slot": "013",
+      "scene": "푹 자고 일어난 가벼운 아침의 가치를 전하며 같은 고민의 사람을 응원하는 모습",
+      "category": "정보성",
+      "position_hint": "closing",
+      "mood": "다정한",
+      "tags": [
+        "아침",
+        "푹 잠",
+        "맑음",
+        "응원",
+        "수면"
+      ]
+    }
+  ]
+}
