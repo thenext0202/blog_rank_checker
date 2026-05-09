@@ -17,7 +17,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # 드래그 정렬 — 없으면 fallback 처리
 try:
@@ -247,6 +247,27 @@ def save_budget_goals(goals):
         json.dump(goals, f, ensure_ascii=False, indent=2)
 
 
+# 목표·달성률에서 사용하는 고정 사용처 레이블 (CSV의 '사용처' 컬럼과 일치)
+USAGE_LABELS = ["공용", "효진 개인", "효진 공용"]
+
+
+def _normalize_cat_goal(v):
+    """카테고리별 목표값을 사용처 dict로 정규화.
+    - dict이면 누락 사용처는 0으로 보강
+    - 기존 int(레거시 단일 금액) 값은 '공용'으로 마이그레이션
+    """
+    if isinstance(v, dict):
+        return {u: int(v.get(u, 0) or 0) for u in USAGE_LABELS}
+    if isinstance(v, (int, float)):
+        return {"공용": int(v), "효진 개인": 0, "효진 공용": 0}
+    return {u: 0 for u in USAGE_LABELS}
+
+
+def _sum_cat_goal(v):
+    """정규화한 사용처별 목표의 합계 (회고/주간 등 기존 로직과의 호환)"""
+    return sum(_normalize_cat_goal(v).values())
+
+
 def load_roadmap_config():
     """로드맵 설정 전체 로드 (구버전 자동 마이그레이션)"""
     if ROADMAP_FILE.exists():
@@ -411,12 +432,8 @@ def parse_data(df):
     else:
         df["실 사용"] = df["순수입(부호)"].abs()
 
-    # 월 컬럼 생성/정리
-    if "월" in df.columns and df["월"].notna().any():
-        df["월"] = df["월"].astype(str).str.strip()
-    else:
-        # 날짜에서 추출
-        df["월"] = df["날짜"].apply(extract_month)
+    # 월 컬럼 생성/정리 — 날짜 컬럼이 있으면 항상 거기서 다시 추출 (CSV의 기존 '월' 값 신뢰 X)
+    df["월"] = df["날짜"].apply(extract_month)
 
     # 수입/지출 구분
     df["구분"] = df["순수입(부호)"].apply(lambda x: "수입" if x > 0 else "지출")
@@ -444,13 +461,27 @@ def parse_data(df):
 
 
 def extract_month(date_str):
-    """날짜 문자열에서 월 추출"""
+    """날짜 문자열에서 'YYYY-MM' 형식의 월 추출"""
     try:
-        date_str = str(date_str)
+        date_str = str(date_str).strip()
+        if not date_str or date_str.lower() in ("nan", "nat", "none"):
+            return "알 수 없음"
+
+        # 1) 한글 형식: "2026년 4월 15일"
         if "년" in date_str and "월" in date_str:
             year = date_str.split("년")[0].strip()
             month = date_str.split("년")[1].split("월")[0].strip()
-            return f"{year}-{int(month):02d}"
+            return f"{int(year):04d}-{int(month):02d}"
+
+        # 2) pandas 파서 fallback: "2026-04-04", "2026/4/4", "26-Apr", "Apr-26", "4/4/2026" 등
+        ts = pd.to_datetime(date_str, errors="coerce", dayfirst=False)
+        if pd.isna(ts):
+            # 두자리 연도 + 영문월 보조 처리 ("26-Apr", "Apr-26")
+            ts = pd.to_datetime(date_str, errors="coerce", format="%y-%b")
+            if pd.isna(ts):
+                ts = pd.to_datetime(date_str, errors="coerce", format="%b-%y")
+        if not pd.isna(ts):
+            return f"{ts.year:04d}-{ts.month:02d}"
     except Exception:
         pass
     return "알 수 없음"
@@ -740,6 +771,41 @@ with st.sidebar:
                         bf.unlink()
                         st.rerun()
 
+    # ─── 파일 형식 검증 (헤더 점검) — 거래 데이터 형식이 아닌 파일은 자동 제외 ───
+    _required_cols = ["이름", "날짜", "대분류", "소분류", "순수입(부호)"]
+    _invalid_files = []   # [(파일명, missing_cols, has_cols)]
+    _valid_paths = []
+    if selected_savedlist:
+        for _name in selected_savedlist:
+            _p = SAVED_DATA_DIR / _name
+            if not _p.exists():
+                continue
+            try:
+                if _p.suffix == ".csv":
+                    _hdr = pd.read_csv(_p, encoding="utf-8-sig", nrows=0)
+                else:
+                    _hdr = pd.read_excel(_p, nrows=0)
+                # BOM·공백 제거 후 컬럼명 비교 (parse_data와 동일 규칙)
+                _has = [str(c).strip().replace("﻿", "") for c in _hdr.columns]
+                _missing = [c for c in _required_cols if c not in _has]
+                if _missing:
+                    _invalid_files.append((_name, _missing, _has))
+                else:
+                    _valid_paths.append(_p)
+            except Exception as _e:
+                # 헤더조차 못 읽는 파일도 무효 처리 (조용히 합산되는 것보다 안전)
+                _invalid_files.append((_name, _required_cols, [f"(읽기 실패: {_e})"]))
+
+    if _invalid_files:
+        with st.expander(f"⚠️ 형식이 맞지 않는 파일 ({len(_invalid_files)}개)", expanded=True):
+            st.warning("아래 파일은 거래 데이터 형식이 아니라서 자동 제외했어요. 월 선택과 합산에서 빠져요.")
+            for _name, _missing, _has in _invalid_files:
+                st.markdown(f"**📄 {_name}**")
+                st.caption(f"필요한데 없는 컬럼: `{', '.join(_missing)}`")
+                _has_text = ", ".join(_has) if _has else "(비어있음)"
+                st.caption(f"파일의 첫 줄(컬럼): `{_has_text}`")
+            st.info("💡 거래 1건당 1행으로 정리하고 첫 줄에 `이름, 날짜, 대분류, 소분류, 순수입(부호)` 컬럼이 들어가도록 다시 저장해 올려주세요.")
+
     st.markdown("---")
 
     # DB 파일 열기
@@ -754,12 +820,9 @@ with st.sidebar:
 
 # ─── 데이터 로드 (여러 파일 합치기) ───
 df = None
-# 로드 대상 파일들 — 새 업로드 우선, 없으면 multiselect로 선택된 파일 모두
-_load_paths = []
-if uploaded_file is not None:
-    _load_paths = [SAVED_DATA_DIR / uploaded_file.name]
-elif selected_savedlist:
-    _load_paths = [SAVED_DATA_DIR / n for n in selected_savedlist]
+# 로드 대상 파일들 — 사이드바에서 헤더 검증을 통과한 파일만 사용
+# (잘못된 형식의 파일은 사이드바 ⚠️ 경고에서 자동 제외됨)
+_load_paths = list(_valid_paths)
 
 if _load_paths:
     try:
@@ -1240,6 +1303,55 @@ if df is not None:
             if fixed_df.empty:
                 st.info("이번 달 고정지출 내역이 없습니다.")
             else:
+                # 사용처별 지출 요약 그래프 (변동지출 탭과 동일 패턴)
+                all_usage_f = fixed_df["사용처"].fillna("").astype(str).str.strip()
+                all_usage_f = all_usage_f.replace("", "미분류")
+                fixed_df = fixed_df.copy()
+                fixed_df["사용처_표시"] = all_usage_f
+                usage_options_f = sorted(fixed_df["사용처_표시"].unique().tolist())
+
+                if len(usage_options_f) > 1:
+                    usage_summary_f = fixed_df.groupby("사용처_표시")["실 사용"].sum().reset_index()
+                    usage_summary_f.columns = ["사용처", "금액"]
+                    usage_summary_f = usage_summary_f.sort_values("금액", ascending=False)
+                    usage_summary_f["라벨"] = usage_summary_f["금액"].apply(_to_korean_won)
+
+                    _usage_max_f = usage_summary_f["금액"].max()
+                    _usage_vals_f, _usage_labels_f = _korean_y_ticks(_usage_max_f)
+
+                    _usage_color_map_f = {
+                        "공용": "#fff59d",       # 연노란색
+                        "효진 개인": "#f8bbd0",  # 연분홍색
+                        "효진 공용": "#b3e5fc",  # 하늘색
+                    }
+
+                    fg_col1, fg_col2 = st.columns(2)
+                    with fg_col1:
+                        fig_fix_bar = px.bar(usage_summary_f, x="사용처", y="금액",
+                                             text="라벨", color="사용처",
+                                             color_discrete_map=_usage_color_map_f,
+                                             color_discrete_sequence=px.colors.qualitative.Set2)
+                        fig_fix_bar.update_traces(textposition="outside", textfont_size=18, cliponaxis=False)
+                        fig_fix_bar.update_layout(showlegend=False, height=380,
+                                                  margin=dict(l=10, r=10, t=60, b=10),
+                                                  xaxis_title="", yaxis_title="",
+                                                  xaxis=dict(tickfont=dict(size=16)),
+                                                  yaxis=dict(tickvals=_usage_vals_f,
+                                                             ticktext=_usage_labels_f,
+                                                             tickfont=dict(size=15)))
+                        st.plotly_chart(fig_fix_bar, use_container_width=True, key="fixed_usage_bar")
+                    with fg_col2:
+                        fig_fix_pie = px.pie(usage_summary_f, values="금액", names="사용처",
+                                             color="사용처",
+                                             color_discrete_map=_usage_color_map_f,
+                                             color_discrete_sequence=px.colors.qualitative.Set2, hole=0.3)
+                        fig_fix_pie.update_traces(textposition="inside", textinfo="label+percent", textfont_size=17)
+                        fig_fix_pie.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10),
+                                                  legend=dict(font=dict(size=15)))
+                        st.plotly_chart(fig_fix_pie, use_container_width=True, key="fixed_usage_pie")
+                    st.markdown("---")
+                    st.markdown("")
+
                 # 전월 소분류별 고정지출 사전
                 _prev_mk_fix = _prev_month_key(selected_month)
                 _prev_fix_by_sub = {}
@@ -1287,6 +1399,10 @@ if df is not None:
                     usage_summary = variable_df.groupby("사용처_표시")["실 사용"].sum().reset_index()
                     usage_summary.columns = ["사용처", "금액"]
                     usage_summary = usage_summary.sort_values("금액", ascending=False)
+                    # 막대 라벨은 행마다 미리 한글 표기로 만들어 둔다
+                    # (color로 trace가 분리되면 update_traces(texttemplate=[...])는
+                    #  모든 trace에 동일한 list를 적용해 첫 값으로 통일되는 버그가 있음)
+                    usage_summary["라벨"] = usage_summary["금액"].apply(_to_korean_won)
 
                     _usage_max = usage_summary["금액"].max()
                     _usage_vals, _usage_labels = _korean_y_ticks(_usage_max)
@@ -1301,11 +1417,10 @@ if df is not None:
                     ug_col1, ug_col2 = st.columns(2)
                     with ug_col1:
                         fig_usage_bar = px.bar(usage_summary, x="사용처", y="금액",
-                                               text="금액", color="사용처",
+                                               text="라벨", color="사용처",
                                                color_discrete_map=_usage_color_map,
                                                color_discrete_sequence=px.colors.qualitative.Set2)
                         fig_usage_bar.update_traces(
-                            texttemplate=[_to_korean_won(v) for v in usage_summary["금액"]],
                             textposition="outside", textfont_size=18, cliponaxis=False)
                         fig_usage_bar.update_layout(showlegend=False, height=380,
                                                      margin=dict(l=10, r=10, t=60, b=10),
@@ -1368,6 +1483,25 @@ if df is not None:
                             st.markdown(_render_html_table(display_df), unsafe_allow_html=True)
                             st.markdown("---")
 
+                # ─── 사용처별 보기 (대분류 드릴다운과 별개) ───
+                # 대분류로 묶지 않고, 공용/효진 개인 같은 영역별로 모든 거래를 평탄하게 나열
+                st.markdown("---")
+                st.markdown("### 👤 사용처별로 보기")
+                _usage_totals = (variable_df.groupby("사용처_표시")["실 사용"]
+                                 .sum().reset_index()
+                                 .sort_values("실 사용", ascending=False))
+                for _, _u_row in _usage_totals.iterrows():
+                    _usage = _u_row["사용처_표시"]
+                    _u_total = _u_row["실 사용"]
+                    _u_items = variable_df[variable_df["사용처_표시"] == _usage]
+                    with st.expander(f"📍 {_usage} — {format_won_abs(_u_total)} ({len(_u_items)}건)"):
+                        _u_cols = ["날짜", "이름", "실 사용", "대분류", "소분류", "결제 방법", "결제 여부"]
+                        _u_disp = _u_items[_u_cols].copy()
+                        _u_disp = _u_disp.sort_values("날짜")
+                        _u_disp.columns = ["날짜", "내용", "금액", "대분류", "소분류", "결제 방법", "결제 여부"]
+                        _u_disp["금액"] = _u_disp["금액"].apply(lambda x: f"{x:,.0f}원")
+                        st.markdown(_render_html_table(_u_disp), unsafe_allow_html=True)
+
         with tab_chart:
             chart_col1, chart_col2 = st.columns(2)
             with chart_col1:
@@ -1394,6 +1528,50 @@ if df is not None:
                     fig_pie.update_layout(height=400, margin=dict(l=10, r=10, t=10, b=10),
                                           showlegend=True, legend=dict(font=dict(size=12)))
                     st.plotly_chart(fig_pie, use_container_width=True)
+
+            # ─── 사용처별로 나눈 대분류 지출 그래프 ───
+            # 위 통합 그래프와 별도로, 공용·효진 개인 같은 영역별로 따로 막대+원그래프 한 세트씩
+            if not expense_df.empty and "사용처" in expense_df.columns:
+                st.markdown("")
+                st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+                st.markdown("")
+                st.markdown("#### 👤 사용처별 대분류 지출")
+                _exp_u = expense_df.copy()
+                _exp_u["사용처_표시"] = (_exp_u["사용처"].fillna("").astype(str)
+                                        .str.strip().replace("", "미분류"))
+                _u_order = (_exp_u.groupby("사용처_표시")["실 사용"].sum()
+                            .sort_values(ascending=False).index.tolist())
+                for _u_idx, _usage in enumerate(_u_order):
+                    _u_df = _exp_u[_exp_u["사용처_표시"] == _usage]
+                    _u_total = _u_df["실 사용"].sum()
+                    _u_by_major = _u_df.groupby("대분류")["실 사용"].sum().reset_index()
+                    _u_by_major.columns = ["대분류", "금액"]
+                    _u_by_major = _u_by_major.sort_values("금액", ascending=True)
+                    if _u_by_major.empty:
+                        continue
+                    st.markdown(f"##### 📍 {_usage} — {format_won_abs(_u_total)}")
+                    _uc1, _uc2 = st.columns(2)
+                    with _uc1:
+                        _ub = px.bar(_u_by_major, x="금액", y="대분류", orientation="h",
+                                     text="금액", color="대분류",
+                                     color_discrete_sequence=px.colors.qualitative.Set2)
+                        _ub.update_traces(texttemplate="%{text:,.0f}원", textposition="outside",
+                                          textfont_size=13, cliponaxis=False)
+                        _ub.update_layout(showlegend=False, height=380,
+                                          margin=dict(l=10, r=120, t=10, b=10),
+                                          xaxis_title="", yaxis_title="",
+                                          yaxis=dict(tickfont=dict(size=13)))
+                        st.plotly_chart(_ub, use_container_width=True,
+                                        key=f"chart_usage_bar_{_u_idx}")
+                    with _uc2:
+                        _up_ = px.pie(_u_by_major, values="금액", names="대분류",
+                                      color_discrete_sequence=px.colors.qualitative.Set2, hole=0.3)
+                        _up_.update_traces(textposition="inside", textinfo="label+percent",
+                                           textfont_size=13)
+                        _up_.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10),
+                                           showlegend=True, legend=dict(font=dict(size=12)))
+                        st.plotly_chart(_up_, use_container_width=True,
+                                        key=f"chart_usage_pie_{_u_idx}")
 
             st.markdown("")
             st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
@@ -1437,29 +1615,31 @@ if df is not None:
 
             # ─── 목표 설정 — 다른 월 미리 입력 가능 ───
             with st.expander("⚙️ 월간 목표 설정", expanded=not bool(month_goals)):
-                # 설정 대상 월 — 사용자 직접 입력 (연도/월 number_input)
-                # 기본값: 현재 보고 있는 월(selected_month) "YYYY-MM" 파싱
+                # 설정 대상 월 — 기본값은 한국 시간(Asia/Seoul) 현재 연/월
+                # session_state로 굳어 과거 월에 회귀하던 문제 → key 제거 + KST 매 rerun 적용
                 try:
-                    _sm_y, _sm_m = map(int, selected_month.split("-"))
+                    from zoneinfo import ZoneInfo
+                    _kst_now = datetime.now(ZoneInfo("Asia/Seoul"))
                 except Exception:
-                    _today_g = datetime.now()
-                    _sm_y, _sm_m = _today_g.year, _today_g.month
+                    # zoneinfo 미지원 환경 fallback (UTC+9 고정)
+                    _kst_now = datetime.now(timezone(timedelta(hours=9)))
+                _sm_y, _sm_m = _kst_now.year, _kst_now.month
 
-                st.caption("🗓️ **목표 설정 대상 월** — 원하는 연도/월을 직접 입력하세요")
+                st.caption(f"🗓️ **목표 설정 대상 월** — 기본값은 한국 시간 기준 오늘 ({_sm_y}년 {_sm_m}월). 다른 월을 입력해도 됩니다.")
                 _gy_col, _gm_col = st.columns(2)
                 with _gy_col:
                     _g_year = st.number_input(
                         "연도",
                         min_value=1900, max_value=9999,
-                        value=int(st.session_state.get("goal_target_year", _sm_y)),
-                        step=1, key="goal_target_year",
+                        value=_sm_y,
+                        step=1,
                     )
                 with _gm_col:
                     _g_month = st.number_input(
                         "월",
                         min_value=1, max_value=12,
-                        value=int(st.session_state.get("goal_target_month_num", _sm_m)),
-                        step=1, key="goal_target_month_num",
+                        value=_sm_m,
+                        step=1,
                     )
                 goal_month = f"{int(_g_year):04d}-{int(_g_month):02d}"
                 # 선택된 목표 대상 월의 저장값 다시 로드
@@ -1510,19 +1690,8 @@ if df is not None:
                     return out
 
                 with st.form("budget_goal_form", clear_on_submit=False):
-                    # 전체 월간 목표
-                    st.markdown(f"### 💰 {goal_month} 전체 월간 목표")
-                    total_goal_input = st.number_input(
-                        "전체 월간 지출 목표 (원)",
-                        min_value=0,
-                        value=month_goals.get("__total__", 0),
-                        step=100000,
-                        format="%d",
-                        key=f"goal_{goal_month}___total__",
-                        help="카테고리 합산과 별도로 전체 지출 목표를 설정합니다"
-                    )
-
-                    st.markdown("---")
+                    # 전체 월간 목표는 별도 입력하지 않고 카테고리 합으로 자동 계산
+                    st.caption("💡 전체 월간 목표는 아래 카테고리 합으로 자동 계산돼요 — 별도로 입력하지 않아도 됩니다.")
                     st.markdown(f"### 📂 {goal_month} 카테고리별 목표")
                     goal_inputs = {}
 
@@ -1531,22 +1700,23 @@ if df is not None:
                     if not all_cats:
                         st.info("표시할 카테고리가 없습니다. 아래 '새 카테고리 추가' 또는 위 '카테고리 관리'에서 숨김 해제하세요.")
 
-                    # 2열로 배치
-                    for i in range(0, len(all_cats), 2):
-                        cols = st.columns(2)
-                        for j, col in enumerate(cols):
-                            idx = i + j
-                            if idx < len(all_cats):
-                                cat = all_cats[idx]
-                                with col:
-                                    goal_inputs[cat] = st.number_input(
-                                        f"{cat}",
-                                        min_value=0,
-                                        value=month_goals.get(cat, 0),
-                                        step=10000,
-                                        format="%d",
-                                        key=f"goal_{goal_month}_{cat}"
-                                    )
+                    # 카테고리당 한 행 — 사용처별(공용/효진 개인/효진 공용) 3칸 입력
+                    st.caption("각 카테고리마다 사용처별로 목표 금액을 따로 설정해요. (0원은 미설정)")
+                    for cat in all_cats:
+                        st.markdown(f"**{cat}**")
+                        _cur = _normalize_cat_goal(month_goals.get(cat, 0))
+                        _u_cols = st.columns(len(USAGE_LABELS))
+                        goal_inputs[cat] = {}
+                        for _ui, _u in enumerate(USAGE_LABELS):
+                            with _u_cols[_ui]:
+                                goal_inputs[cat][_u] = st.number_input(
+                                    _u,
+                                    min_value=0,
+                                    value=_cur[_u],
+                                    step=10000,
+                                    format="%d",
+                                    key=f"goal_{goal_month}_{cat}_{_u}"
+                                )
 
                     # 새 카테고리 추가 — 이름만 입력하면 등록, 금액은 위 입력창에서
                     st.markdown("**➕ 새 카테고리 추가**")
@@ -1558,10 +1728,13 @@ if df is not None:
                     )
 
                     if st.form_submit_button(f"💾 {goal_month} 월간 목표 저장", use_container_width=True, type="primary"):
-                        # 0원이 아닌 것만 월별 저장
-                        saved_goals = {k: v for k, v in goal_inputs.items() if v > 0}
-                        if total_goal_input > 0:
-                            saved_goals["__total__"] = total_goal_input
+                        # 0원이 아닌 사용처만 남기고, 카테고리에 양수 값이 하나라도 있으면 저장
+                        saved_goals = {}
+                        for cat, _by_usage in goal_inputs.items():
+                            _cleaned = {u: int(amt) for u, amt in _by_usage.items() if int(amt) > 0}
+                            if _cleaned:
+                                saved_goals[cat] = _cleaned
+                        # 전체 월간 목표는 카테고리 합으로 자동 산출 — __total__ 키는 더 이상 저장하지 않음
                         # 새 카테고리: 이름만으로 전역 등록 (금액은 다음 저장 때 위 입력창에서)
                         _new_name = new_cat_name.strip()
                         if _new_name and _new_name not in registered_cats:
@@ -1694,17 +1867,42 @@ if df is not None:
                 )
 
                 if weekly_mode == "자동 (월간 목표 ÷ 주차수)":
-                    # 자동 모드 — 계산 결과 미리보기
-                    cat_goals_preview = {k: v for k, v in month_goals.items() if not k.startswith("__")}
-                    overall_preview = month_goals.get("__total__", 0)
-                    total_preview = overall_preview if overall_preview > 0 else sum(cat_goals_preview.values())
+                    # 자동 모드 — 사용처별 미리보기 (월간 사용처 금액 ÷ 4주)
+                    cat_goals_by_usage_preview = {
+                        k: _normalize_cat_goal(v)
+                        for k, v in month_goals.items() if not k.startswith("__")
+                    }
+                    # 합계 0인 카테고리 제외
+                    cat_goals_by_usage_preview = {
+                        k: d for k, d in cat_goals_by_usage_preview.items() if sum(d.values()) > 0
+                    }
+                    total_preview = sum(sum(d.values()) for d in cat_goals_by_usage_preview.values())
+
                     if total_preview > 0:
-                        st.caption("월간 목표 ÷ 4주 기준 자동 계산 결과:")
-                        auto_rows = []
-                        for cat, amt in sorted(cat_goals_preview.items()):
-                            auto_rows.append({"카테고리": cat, "월간 목표": f"{amt:,.0f}원", "주간 목표": f"{amt / 4:,.0f}원"})
-                        auto_rows.append({"카테고리": "🪙 전체", "월간 목표": f"{total_preview:,.0f}원", "주간 목표": f"{total_preview / 4:,.0f}원"})
-                        st.dataframe(pd.DataFrame(auto_rows), use_container_width=True, hide_index=True)
+                        st.caption("월간 목표 ÷ 4주 기준 자동 계산 결과 — 영역별로 분리")
+                        # 영역(사용처)마다 표 하나씩 — 데이터가 있는 영역만 노출
+                        for _u in USAGE_LABELS:
+                            _u_rows = []
+                            _u_total = 0
+                            for cat in sorted(cat_goals_by_usage_preview.keys()):
+                                _amt = cat_goals_by_usage_preview[cat].get(_u, 0)
+                                if _amt <= 0:
+                                    continue
+                                _u_total += _amt
+                                _u_rows.append({
+                                    "카테고리": cat,
+                                    "월간 목표": f"{_amt:,.0f}원",
+                                    "주간 목표": f"{_amt / 4:,.0f}원",
+                                })
+                            if not _u_rows:
+                                continue
+                            _u_rows.append({
+                                "카테고리": "🪙 합계",
+                                "월간 목표": f"{_u_total:,.0f}원",
+                                "주간 목표": f"{_u_total / 4:,.0f}원",
+                            })
+                            st.markdown(f"**📍 {_u}**")
+                            st.dataframe(pd.DataFrame(_u_rows), use_container_width=True, hide_index=True)
                     else:
                         st.info("월간 목표를 먼저 설정하면 자동 계산 결과가 표시됩니다.")
 
@@ -1716,17 +1914,10 @@ if df is not None:
                         st.rerun()
 
                 else:
-                    # 직접 설정 모드
+                    # 직접 설정 모드 — 카테고리별 주간 목표만 입력 (주간 전체는 합으로 자동 계산)
                     with st.form("weekly_goal_form", clear_on_submit=False):
-                        st.caption("주간 전체 목표와 카테고리별 주간 목표를 직접 설정합니다")
-                        weekly_goal_input = st.number_input(
-                            "주간 전체 지출 목표 (원)",
-                            min_value=0,
-                            value=month_goals.get("__weekly_total__", 0),
-                            step=10000,
-                            format="%d",
-                            key=f"weekly_total_{goal_month}"
-                        )
+                        st.caption("카테고리별 주간 목표를 사용처별로 직접 설정합니다. 주간 전체 목표는 카테고리 합으로 자동 계산돼요.")
+
                         # 카테고리별 주간 목표 (전체 월 + 등록 + 현재 데이터 카테고리 통합)
                         all_known_cats = set()
                         for _mk, _mv in all_goals.items():
@@ -1742,163 +1933,40 @@ if df is not None:
                         display_cats = sorted(all_known_cats)
                         weekly_cat_inputs = {}
                         if display_cats:
-                            for i in range(0, len(display_cats), 2):
-                                w_cols = st.columns(2)
-                                for j, w_col in enumerate(w_cols):
-                                    w_idx = i + j
-                                    if w_idx < len(display_cats):
-                                        w_cat = display_cats[w_idx]
-                                        with w_col:
-                                            weekly_cat_inputs[w_cat] = st.number_input(
-                                                f"{w_cat} (주간)",
-                                                min_value=0,
-                                                value=month_goals.get(f"__weekly_cat_{w_cat}", 0),
-                                                step=5000,
-                                                format="%d",
-                                                key=f"wgoal_{goal_month}_{w_cat}"
-                                            )
+                            st.markdown("---")
+                            st.markdown("**📂 카테고리별 주간 목표**")
+                            for w_cat in display_cats:
+                                st.markdown(f"**{w_cat}**")
+                                _cur_wc = _normalize_cat_goal(month_goals.get(f"__weekly_cat_{w_cat}", 0))
+                                _wc_cols = st.columns(len(USAGE_LABELS))
+                                weekly_cat_inputs[w_cat] = {}
+                                for _wci, _u in enumerate(USAGE_LABELS):
+                                    with _wc_cols[_wci]:
+                                        weekly_cat_inputs[w_cat][_u] = st.number_input(
+                                            _u,
+                                            min_value=0,
+                                            value=_cur_wc[_u],
+                                            step=5000,
+                                            format="%d",
+                                            key=f"wgoal_{goal_month}_{w_cat}_{_u}"
+                                        )
 
                         if st.form_submit_button(f"💾 {goal_month} 주간 목표 저장", use_container_width=True, type="primary"):
                             # 기존 월간 목표 유지 + 주간 목표 업데이트
                             saved_goals = {k: v for k, v in month_goals.items() if not k.startswith("__weekly_")}
                             saved_goals["__weekly_mode__"] = "manual"
-                            if weekly_goal_input > 0:
-                                saved_goals["__weekly_total__"] = weekly_goal_input
-                            for w_cat, w_amt in weekly_cat_inputs.items():
-                                if w_amt > 0:
-                                    saved_goals[f"__weekly_cat_{w_cat}"] = w_amt
+                            # 주간 전체는 합으로 자동 산출 — __weekly_total__ 키는 더 이상 저장하지 않음
+                            for w_cat, _by_u in weekly_cat_inputs.items():
+                                _wc_clean = {u: int(amt) for u, amt in _by_u.items() if int(amt) > 0}
+                                if _wc_clean:
+                                    saved_goals[f"__weekly_cat_{w_cat}"] = _wc_clean
                             all_goals[goal_month] = saved_goals
                             save_budget_goals(all_goals)
                             st.success(f"✅ {goal_month} 주간 목표가 저장되었습니다!")
                             st.rerun()
 
-            # 목표 새로 로드 (저장 후 반영)
-            all_goals = load_budget_goals()
-            month_goals = all_goals.get(selected_month, {})
-
-            # 카테고리별 목표만 분리 (내부 키 제외)
-            cat_goals = {k: v for k, v in month_goals.items() if not k.startswith("__")}
-            overall_goal = month_goals.get("__total__", 0)
-            weekly_mode_saved = month_goals.get("__weekly_mode__", "auto")
-
-            # 사용자 정렬/숨김 적용 (저장 직후 최신값 기준)
-            _order_after_raw = all_goals.get("__cat_order__", [])
-            _order_after = [str(c) for c in (_order_after_raw if isinstance(_order_after_raw, list) else [])]
-            _hidden_after_raw = all_goals.get("__hidden_cats__", [])
-            _hidden_after_set = set(str(c) for c in (_hidden_after_raw if isinstance(_hidden_after_raw, list) else []))
-            cat_goals = {k: v for k, v in cat_goals.items() if k not in _hidden_after_set}
-
-            def _sorted_cats_for_display(cats_iter):
-                _cats = set(cats_iter)
-                _seen, _out = set(), []
-                for _c in _order_after:
-                    if _c in _cats and _c not in _seen:
-                        _out.append(_c); _seen.add(_c)
-                for _c in sorted(_cats):
-                    if _c not in _seen:
-                        _out.append(_c); _seen.add(_c)
-                return _out
-
-            if not cat_goals and not overall_goal:
-                pass  # 안내 문구 없음 — 사용자 요청
-            else:
-                # ※ 월간 달성률은 회고 탭으로 이동되었습니다 (목표 vs 실제 + 회고 메모)
-                # display_total_goal — 주간 자동 모드 계산에 필요
-                display_total_goal = overall_goal if overall_goal > 0 else sum(cat_goals.values())
-
-                # ─── 주간 달성률 ───
-                st.markdown("#### 📆 주간 달성률")
-
-                # 날짜 파싱 — 주차 계산 (한글 형식 지원)
-                if not expense_df.empty and "날짜" in expense_df.columns:
-                    week_df = expense_df.copy()
-                    week_df["날짜_parsed"] = parse_dates_kr(week_df["날짜"])
-                    week_df = week_df.dropna(subset=["날짜_parsed"])
-
-                    if not week_df.empty:
-                        # 주차 계산 (월 기준 1~5주)
-                        week_df["일"] = week_df["날짜_parsed"].dt.day
-                        week_df["주차"] = ((week_df["일"] - 1) // 7 + 1).astype(int)
-                        week_df["주차"] = week_df["주차"].clip(upper=5)
-
-                        weeks_in_month = sorted(week_df["주차"].unique())
-                        num_weeks = max(weeks_in_month) if weeks_in_month else 4
-
-                        # 주간 목표 결정 (직접 설정 vs 자동 계산)
-                        if weekly_mode_saved == "manual":
-                            # 직접 설정한 주간 목표 사용
-                            weekly_total_goal = month_goals.get("__weekly_total__", 0)
-                            weekly_cat_goals = {}
-                            for cat in cat_goals:
-                                manual_val = month_goals.get(f"__weekly_cat_{cat}", 0)
-                                if manual_val > 0:
-                                    weekly_cat_goals[cat] = manual_val
-                                else:
-                                    # 직접 설정 안 한 카테고리는 월간 목표 / 주차수
-                                    weekly_cat_goals[cat] = cat_goals[cat] / num_weeks
-                            if weekly_total_goal == 0:
-                                weekly_total_goal = sum(weekly_cat_goals.values())
-                            st.caption("📌 직접 설정한 주간 목표 적용 중")
-                        else:
-                            # 자동: 월간 목표 / 주차수
-                            weekly_cat_goals = {cat: amt / num_weeks for cat, amt in cat_goals.items()}
-                            weekly_total_goal = (display_total_goal / num_weeks) if display_total_goal > 0 else 0
-
-                        # 전 주차 요약 테이블 (한눈에 보기)
-                        st.markdown("**📋 전 주차 요약**")
-                        all_week_rows = []
-                        for w in weeks_in_month:
-                            w_expense = week_df[week_df["주차"] == w]
-                            w_spent = w_expense["실 사용"].sum() if not w_expense.empty else 0
-                            w_pct = (w_spent / weekly_total_goal * 100) if weekly_total_goal > 0 else 0
-                            w_status = "✅ 여유" if w_pct <= 80 else ("⚠️ 주의" if w_pct <= 100 else "🚨 초과")
-                            all_week_rows.append({
-                                "주차": f"{w}주차 ({(w-1)*7+1}~{min(w*7, 31)}일)",
-                                "주간 목표": f"{weekly_total_goal:,.0f}원",
-                                "사용": f"{w_spent:,.0f}원",
-                                "잔여": f"{weekly_total_goal - w_spent:,.0f}원",
-                                "달성률": f"{w_pct:.0f}%",
-                                "상태": w_status
-                            })
-                        all_week_df = pd.DataFrame(all_week_rows)
-                        st.dataframe(all_week_df, use_container_width=True, hide_index=True)
-
-                        st.markdown("---")
-
-                        # 특정 주차 상세 (카테고리별)
-                        if weekly_cat_goals:
-                            selected_week = st.selectbox(
-                                "주차별 카테고리 상세",
-                                weeks_in_month,
-                                format_func=lambda w: f"{w}주차 ({(w-1)*7+1}일 ~ {min(w*7, 31)}일)"
-                            )
-
-                            week_expense = week_df[week_df["주차"] == selected_week]
-
-                            week_rows = []
-                            for cat, w_goal in sorted(weekly_cat_goals.items()):
-                                if not week_expense.empty:
-                                    w_spent = week_expense[week_expense["대분류"] == cat]["실 사용"].sum()
-                                else:
-                                    w_spent = 0
-                                w_pct = (w_spent / w_goal * 100) if w_goal > 0 else 0
-                                w_remain = w_goal - w_spent
-                                w_status = "✅ 여유" if w_pct <= 80 else ("⚠️ 주의" if w_pct <= 100 else "🚨 초과")
-                                week_rows.append({
-                                    "카테고리": cat,
-                                    "주간 목표": f"{w_goal:,.0f}원",
-                                    "사용": f"{w_spent:,.0f}원",
-                                    "잔여": f"{w_remain:,.0f}원",
-                                    "달성률": f"{w_pct:.0f}%",
-                                    "상태": w_status
-                                })
-
-                            week_goal_df = pd.DataFrame(week_rows)
-                            st.dataframe(week_goal_df, use_container_width=True, hide_index=True)
-                    else:
-                        st.warning("날짜 데이터를 파싱할 수 없어 주간 분석이 불가합니다.")
-                else:
-                    st.info("지출 데이터가 없습니다.")
+            # 주간 달성률 표시 영역은 제거됨 (사용자 요청)
+            # 카테고리별 달성률은 🪞 회고 탭에서 사용처(공용/효진 개인/효진 공용)별로 표시됨
 
         with tab_memo:
             st.markdown(f"### 🪞 {selected_month} 지출 회고")
@@ -1909,9 +1977,12 @@ if df is not None:
             # ─── 🎯 목표 vs 실제 ───
             _all_goals_review = load_budget_goals()
             _month_goals_review = _all_goals_review.get(selected_month, {})
-            _overall_goal_review = int(_month_goals_review.get("__total__", 0) or 0)
-            _cat_goals_review = {k: int(v) for k, v in _month_goals_review.items()
-                                 if not k.startswith("__") and isinstance(v, (int, float)) and v > 0}
+            # __total__ 키는 무시하고 카테고리 합으로 자동 산출 (아래 _cat_goals_review 정의 후 채워짐)
+            _overall_goal_review = 0
+            # 사용처별 dict / 레거시 int 모두 합계로 환산 (사용처별 분리 표시는 아래에서 별도 처리)
+            _cat_goals_review = {k: _sum_cat_goal(v) for k, v in _month_goals_review.items()
+                                 if not k.startswith("__")}
+            _cat_goals_review = {k: v for k, v in _cat_goals_review.items() if v > 0}
 
             # 숨김 카테고리 제외
             _hidden_review = _all_goals_review.get("__hidden_cats__", [])
@@ -1919,6 +1990,8 @@ if df is not None:
                 _hidden_review = []
             _hidden_review_set = set(_hidden_review)
             _cat_goals_review = {k: v for k, v in _cat_goals_review.items() if k not in _hidden_review_set}
+            # 전체 목표는 (숨김 제외 후) 카테고리 합으로 자동
+            _overall_goal_review = sum(_cat_goals_review.values())
 
             # 사용자 정의 순서
             _cat_order_review = _all_goals_review.get("__cat_order__", [])
@@ -1980,22 +2053,37 @@ if df is not None:
                     _goal_rows = []
                     _chart_rows = []
                     for _cat in _display_cats_review:
+                        # 사용처별 목표 → 행 단위로 분리해서 표시 (목표가 있는 사용처만)
+                        _by_usage = _normalize_cat_goal(_month_goals_review.get(_cat, 0))
+                        for _u in USAGE_LABELS:
+                            _g_u = _by_usage[_u]
+                            if _g_u <= 0:
+                                continue
+                            if expense_df.empty:
+                                _s_u = 0
+                            else:
+                                _s_u = abs(expense_df[(expense_df["대분류"] == _cat) &
+                                                      (expense_df["사용처"] == _u)]["실 사용"].sum())
+                            _pct_u = (_s_u / _g_u * 100) if _g_u > 0 else 0
+                            _rem_u = _g_u - _s_u
+                            _stat_u = "✅ 여유" if _pct_u <= 80 else ("⚠️ 주의" if _pct_u <= 100 else "🚨 초과")
+                            _goal_rows.append({
+                                "카테고리": _cat,
+                                "사용처": _u,
+                                "목표": f"{_g_u:,.0f}원",
+                                "사용": f"{_s_u:,.0f}원",
+                                "잔여": f"{_rem_u:,.0f}원",
+                                "달성률": f"{_pct_u:.0f}%",
+                                "상태": _stat_u,
+                            })
+
+                        # 막대그래프는 카테고리 합계 기준 유지 (한눈 비교용)
                         _g = _cat_goals_review[_cat]
                         if expense_df.empty:
                             _s = 0
                         else:
                             _s = abs(expense_df[expense_df["대분류"] == _cat]["실 사용"].sum())
                         _pct = (_s / _g * 100) if _g > 0 else 0
-                        _rem = _g - _s
-                        _stat = "✅ 여유" if _pct <= 80 else ("⚠️ 주의" if _pct <= 100 else "🚨 초과")
-                        _goal_rows.append({
-                            "카테고리": _cat,
-                            "목표": f"{_g:,.0f}원",
-                            "사용": f"{_s:,.0f}원",
-                            "잔여": f"{_rem:,.0f}원",
-                            "달성률": f"{_pct:.0f}%",
-                            "상태": _stat,
-                        })
                         _chart_rows.append({
                             "카테고리": _cat,
                             "달성률": min(_pct, 150),
@@ -2274,11 +2362,14 @@ if df is not None:
 
             # ─── 🎯 예산 vs 실제 ───
             _up_month_goals = _up_goals.get(selected_month, {}) or {}
-            _up_overall_goal = int(_up_month_goals.get("__total__", 0) or 0)
-            _up_cat_goals_dict = {k: int(v) for k, v in _up_month_goals.items()
-                                  if not k.startswith("__") and isinstance(v, (int, float)) and int(v) > 0}
+            _up_overall_goal = 0  # 카테고리 합으로 아래에서 자동 산출
+            # 사용처별 dict / 레거시 int 모두 합계로 환산
+            _up_cat_goals_dict = {k: _sum_cat_goal(v) for k, v in _up_month_goals.items()
+                                  if not k.startswith("__")}
+            _up_cat_goals_dict = {k: v for k, v in _up_cat_goals_dict.items() if v > 0}
             _up_hidden = set(_up_goals.get("__hidden_cats__", []) or [])
             _up_cat_goals_dict = {k: v for k, v in _up_cat_goals_dict.items() if k not in _up_hidden}
+            _up_overall_goal = sum(_up_cat_goals_dict.values())
             _up_total_spent = abs(expense_df["실 사용"].sum()) if not expense_df.empty else 0
 
             if _up_overall_goal > 0 or _up_cat_goals_dict:
@@ -2785,11 +2876,14 @@ if df is not None:
 
             # ─── 🎯 예산 vs 실제 ───
             _u2_month_goals = _u2_goals.get(selected_month, {}) or {}
-            _u2_overall_goal = int(_u2_month_goals.get("__total__", 0) or 0)
-            _u2_cat_goals_dict = {k: int(v) for k, v in _u2_month_goals.items()
-                                  if not k.startswith("__") and isinstance(v, (int, float)) and int(v) > 0}
+            _u2_overall_goal = 0  # 카테고리 합으로 아래에서 자동 산출
+            # 사용처별 dict / 레거시 int 모두 합계로 환산
+            _u2_cat_goals_dict = {k: _sum_cat_goal(v) for k, v in _u2_month_goals.items()
+                                  if not k.startswith("__")}
+            _u2_cat_goals_dict = {k: v for k, v in _u2_cat_goals_dict.items() if v > 0}
             _u2_hidden = set(_u2_goals.get("__hidden_cats__", []) or [])
             _u2_cat_goals_dict = {k: v for k, v in _u2_cat_goals_dict.items() if k not in _u2_hidden}
+            _u2_overall_goal = sum(_u2_cat_goals_dict.values())
             _u2_total_spent = abs(expense_df["실 사용"].sum()) if not expense_df.empty else 0
 
             if _u2_overall_goal > 0 or _u2_cat_goals_dict:
