@@ -4,6 +4,7 @@ __pycache__/
 *.json
 !railway.json
 .env
+.api_key
 *.pyc
 
 # Chrome 프로필 (로그인 세션)
