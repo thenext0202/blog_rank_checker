@@ -37,3 +37,35 @@ def normalize_date(token, today):
         if unit == "개월":
             return today - timedelta(days=30 * n)
     return today  # 해석 불가 시 당일로 폴백(드묾)
+
+
+# 블로그 계열 아님 — 제외 헤더 키워드
+EXCLUDE = [
+    '광고', '가격비교', '플러스 스토어', '네이버 클립', '함께 많이 찾는', 'AI 브리핑',
+    '인플루언서', '지식백과', '이미지', '동영상', '관련 브랜드 콘텐츠', '뉴스', '지식iN',
+    '나무위키', '위키백과', 'www.', '.com', '.go.kr', '.org', '건강 소식',
+]
+
+def _is_excluded(header):
+    return any(x in header for x in EXCLUDE)
+
+def classify(unit, n_posts):
+    """유닛 → (종류, 헤더) 또는 None.
+    n_posts = 유닛 안 날짜 토큰 수 ≈ 묶인 글 수. 2개 이상이면 묶음 블록.
+    """
+    h = unit["header"]
+    if unit["blog"] == 0 and unit["cafe"] == 0:
+        return None
+    if _is_excluded(h):
+        return None
+    grouped = n_posts >= 2
+    # 인기글: _fe_view_root + "인기글"로 끝남 + 묶음
+    if unit["fe_view"] and h.endswith("인기글") and grouped:
+        return ("인기글", h)
+    # 스블: 그 외 묶음 블록
+    if grouped:
+        return ("스블", h)
+    # 낱개 글: 블로그면 통검블로그 (카페 낱개는 블로그계열 아님 → 제외)
+    if unit["blog"] > 0:
+        return ("통검블로그", h)
+    return None
