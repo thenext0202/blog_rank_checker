@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """블록 체커 탭 연결·읽기·기록. 이 탭 외 다른 탭은 절대 다루지 않는다."""
 import os, json, base64, re
+from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
+from serp_parser import fmt_popular, fmt_smartblock, fmt_general
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(BASE, "config.json"), encoding="utf-8") as f:
@@ -70,3 +72,24 @@ def clear_checkboxes(ws, row_nums):
     if not row_nums:
         return
     ws.batch_update([{"range": f"B{r}", "values": [[False]]} for r in row_nums])
+
+
+def build_row_values(result, today, now_str):
+    """parse_keyword 결과 → C..I열 값 리스트 (포맷 적용)."""
+    p_flag, p_dates = fmt_popular(result["인기글"], today)
+    s_flag, s_text = fmt_smartblock(result["스블"], today)
+    g_flag, g_dates = fmt_general(result["통검블로그"], today)
+    status = f"완료 {now_str}"
+    return [p_flag, p_dates, s_flag, s_text, g_flag, g_dates, status]
+
+
+def write_result(ws, row_num, result, today):
+    """C{row}:I{row}에 결과 1행 기록 (명시 범위, append 금지)."""
+    now_str = datetime.now().strftime("%m/%d %H:%M")
+    values = build_row_values(result, today, now_str)
+    ws.update(values=[values], range_name=f"C{row_num}:I{row_num}")
+
+
+def write_error(ws, row_num, msg):
+    """I열에 오류 상태 기록."""
+    ws.update(values=[[f"오류: {msg}"]], range_name=f"I{row_num}")
