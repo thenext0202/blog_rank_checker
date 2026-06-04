@@ -25,6 +25,9 @@ diagnose*.py
 test_*.py
 check_*.py
 
+# 블로그 블록 체커 테스트 (test_*.py 규칙 이후에 예외로 허용)
+!블로그 블록 체커/tests/test_serp_parser.py
+
 credentials.json
 
 # 별도 GitHub 저장소로 관리되는 하위 프로젝트
