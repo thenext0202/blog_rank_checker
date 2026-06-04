@@ -110,3 +110,81 @@ def fmt_general(blocks, today):
         return ("❌", "")
     all_dates = [d for b in blocks for d in b["dates"]]
     return (f"✅ {len(blocks)}건", _dates_str(all_dates, today))
+
+
+import time, urllib.parse
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+
+# main_pack 전체에서 섹션박스 넓게 수집 + 조상 중복 제거(낱개 글은 각자 유닛 유지)
+UNITS_JS = r"""
+var pack=document.getElementById('main_pack')||document.body;
+var nodes=pack.querySelectorAll('section, div.api_subject_bx, div[class*="sc_"], div[class*="fds-"]');
+var out=[], seen=new Set();
+function header(el){var h=el.querySelector('h2,h3,.api_title,[class*="title"]');
+  return h?h.textContent.trim().replace(/\s+/g,' ').slice(0,45):'';}
+for(var i=0;i<nodes.length;i++){var el=nodes[i];
+  var skip=false,p=el.parentElement;
+  while(p){if(seen.has(p)){skip=true;break;}p=p.parentElement;}
+  if(skip)continue;
+  var blog=el.querySelectorAll('a[href*="blog.naver.com"]').length;
+  var cafe=el.querySelectorAll('a[href*="cafe.naver.com"]').length;
+  var h=header(el);
+  if(!h && blog===0 && cafe===0)continue;
+  seen.add(el);
+  out.push({header:h, fe_view:((el.className||'').indexOf('_fe_view_root')>=0),
+            blog:blog, cafe:cafe, text:(el.innerText||'').slice(0,5000)});
+}
+return out;
+"""
+
+def create_driver():
+    """headless Chrome (자동화 탐지 우회) — 순위체커 패턴 재사용."""
+    opts = Options()
+    for a in ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+              "--disable-gpu", "--window-size=1920,1080",
+              "--disable-blink-features=AutomationControlled"]:
+        opts.add_argument(a)
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
+    opts.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+    import os
+    chrome_bin = os.environ.get("CHROME_BIN")
+    if chrome_bin:
+        opts.binary_location = chrome_bin
+        driver = webdriver.Chrome(options=opts)
+    else:
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"})
+    driver.implicitly_wait(5)
+    return driver
+
+def capture_units(driver, keyword):
+    """키워드 PC 검색결과 렌더링 후 유닛 리스트 반환."""
+    driver.get("https://search.naver.com/search.naver?query=" + urllib.parse.quote(keyword))
+    time.sleep(3)
+    for _ in range(6):
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+        time.sleep(1.0)
+    return driver.execute_script(UNITS_JS) or []
+
+def parse_keyword(driver, keyword, today):
+    """키워드 1개 → {'인기글':[{header,dates}], '스블':[...], '통검블로그':[...]}.
+    dates는 정규화된 date 객체 리스트."""
+    units = capture_units(driver, keyword)
+    result = {"인기글": [], "스블": [], "통검블로그": []}
+    for u in units:
+        raw = extract_dates(u["text"])
+        c = classify(u, len(raw))
+        if not c:
+            continue
+        kind, header = c
+        dates = [normalize_date(t, today) for t in raw]
+        result[kind].append({"header": header, "dates": dates})
+    return result
