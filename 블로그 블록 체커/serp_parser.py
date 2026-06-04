@@ -69,3 +69,44 @@ def classify(unit, n_posts):
     if unit["blog"] > 0:
         return ("통검블로그", h)
     return None
+
+
+def _fmt_one_date(d, today):
+    """올해면 MM.DD, 다른 해면 YYYY.MM.DD."""
+    if d.year == today.year:
+        return d.strftime("%m.%d")
+    return d.strftime("%Y.%m.%d")
+
+def _dates_str(dates, today):
+    """date 리스트 → '3건: 06.03, 05.28, 2025.09.18' (최신순)."""
+    ds = sorted(dates, reverse=True)
+    joined = ", ".join(_fmt_one_date(d, today) for d in ds)
+    return f"{len(ds)}건: {joined}"
+
+def fmt_popular(blocks, today):
+    """인기글 → (flag, 날짜문자열). blocks는 보통 0~1개."""
+    if not blocks:
+        return ("❌", "")
+    header = blocks[0]["header"]
+    field = header[:-len("인기글")].strip() if header != "인기글" else ""
+    flag = f"✅ {field}" if field else "✅"
+    all_dates = [d for b in blocks for d in b["dates"]]
+    return (flag, _dates_str(all_dates, today))
+
+def fmt_smartblock(blocks, today):
+    """스블 → (flag, 블록별 줄바꿈 텍스트)."""
+    if not blocks:
+        return ("❌", "")
+    lines = []
+    for b in blocks:
+        ds = sorted(b["dates"], reverse=True)
+        joined = ", ".join(_fmt_one_date(d, today) for d in ds)
+        lines.append(f"{b['header']}({len(ds)}): {joined}")
+    return (f"✅ {len(blocks)}블록", "\n".join(lines))
+
+def fmt_general(blocks, today):
+    """통검블로그 낱개 → (flag, 날짜문자열). 블록 1개 = 글 1개."""
+    if not blocks:
+        return ("❌", "")
+    all_dates = [d for b in blocks for d in b["dates"]]
+    return (f"✅ {len(blocks)}건", _dates_str(all_dates, today))

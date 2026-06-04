@@ -73,3 +73,42 @@ def test_classify_브랜드콘텐츠_제외():
 def test_classify_비블로그_제외():
     assert classify(_u("네이버 가격비교", False, 0, 0), n_posts=0) is None
     assert classify(_u("네이버 지식iN 2주 전", False, 0, 0), n_posts=1) is None
+
+
+from serp_parser import fmt_popular, fmt_smartblock, fmt_general
+
+T = date(2026, 6, 4)
+
+def test_fmt_popular_분야명():
+    blocks = [{"header": "건강·의학 인기글",
+               "dates": [date(2026,5,7), date(2026,3,27)]}]
+    flag, dates = fmt_popular(blocks, T)
+    assert flag == "✅ 건강·의학"
+    assert dates == "2건: 05.07, 03.27"
+
+def test_fmt_popular_접두어없음():
+    blocks = [{"header": "인기글", "dates": [date(2026,6,3)]}]
+    flag, dates = fmt_popular(blocks, T)
+    assert flag == "✅"
+    assert dates == "1건: 06.03"
+
+def test_fmt_popular_없음():
+    assert fmt_popular([], T) == ("❌", "")
+
+def test_fmt_smartblock_여러블록_줄바꿈():
+    blocks = [
+        {"header": "맥스콘드로이친", "dates": [date(2026,5,14), date(2025,9,18)]},
+        {"header": "관절엔 콘드로이친", "dates": [date(2026,5,31)]},
+    ]
+    flag, text = fmt_smartblock(blocks, T)
+    assert flag == "✅ 2블록"
+    assert text == "맥스콘드로이친(2): 05.14, 2025.09.18\n관절엔 콘드로이친(1): 05.31"
+
+def test_fmt_general():
+    blocks = [
+        {"header": "x", "dates": [date(2026,5,30)]},
+        {"header": "y", "dates": [date(2026,5,21)]},
+    ]
+    flag, dates = fmt_general(blocks, T)
+    assert flag == "✅ 2건"
+    assert dates == "2건: 05.30, 05.21"
