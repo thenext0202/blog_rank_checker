@@ -27,6 +27,7 @@ check_*.py
 
 # 블로그 블록 체커 테스트 (test_*.py 규칙 이후에 예외로 허용)
 !블로그 블록 체커/tests/test_serp_parser.py
+!블로그 블록 체커/tests/test_sheets.py
 
 credentials.json
 
