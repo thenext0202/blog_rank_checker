@@ -17,11 +17,12 @@ def run_once():
         print("    처리 대상 없음. 블록 체커 탭 B열에 체크하세요.")
         return
     print(f"    {len(targets)}개 처리 대상")
-    sheets.clear_checkboxes(ws, [r for r, _ in targets])
 
     print("\n[2] 브라우저 준비...")
     driver = create_driver()
     today = date.today()
+    # 드라이버 준비 성공 후에 체크 해제 — 초기화 실패 시 체크가 남아 재시도 가능
+    sheets.clear_checkboxes(ws, [r for r, _ in targets])
     try:
         for i, (row, kw) in enumerate(targets, 1):
             print(f"\n  [{i}/{len(targets)}] {kw} (행 {row})")
