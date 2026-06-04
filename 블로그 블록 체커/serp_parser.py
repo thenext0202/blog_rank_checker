@@ -72,10 +72,11 @@ def classify(unit, n_posts):
 
 
 def _fmt_one_date(d, today):
-    """올해면 MM.DD, 다른 해면 YYYY.MM.DD."""
-    if d.year == today.year:
-        return d.strftime("%m.%d")
-    return d.strftime("%Y.%m.%d")
+    """'5/3(25일 전)' 형식. 올해면 M/D, 다른 해면 YYYY/M/D. 옆에 실행일 기준 경과일."""
+    base = f"{d.month}/{d.day}" if d.year == today.year else f"{d.year}/{d.month}/{d.day}"
+    n = (today - d).days
+    rel = "오늘" if n <= 0 else f"{n}일 전"
+    return f"{base}({rel})"
 
 def _dates_str(dates, today):
     """date 리스트 → '3건: 06.03, 05.28, 2025.09.18' (최신순)."""

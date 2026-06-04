@@ -83,11 +83,21 @@ def build_row_values(result, today, now_str):
     return [p_flag, p_dates, s_flag, s_text, g_flag, g_dates, status]
 
 
+# 가운데 정렬(가로 중앙 + 세로 중앙) + 줄바꿈 표시
+CENTER_FMT = {
+    "horizontalAlignment": "CENTER",
+    "verticalAlignment": "MIDDLE",
+    "wrapStrategy": "WRAP",
+}
+
+
 def write_result(ws, row_num, result, today):
-    """C{row}:I{row}에 결과 1행 기록 (명시 범위, append 금지)."""
+    """C{row}:I{row}에 결과 1행 기록 (명시 범위, append 금지) + 가운데 정렬."""
     now_str = datetime.now().strftime("%m/%d %H:%M")
     values = build_row_values(result, today, now_str)
     ws.update(values=[values], range_name=f"C{row_num}:I{row_num}")
+    # 기록한 행 전체(키워드~상태) 가운데 정렬
+    ws.format(f"A{row_num}:I{row_num}", CENTER_FMT)
 
 
 def write_error(ws, row_num, msg):

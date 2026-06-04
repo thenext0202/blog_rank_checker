@@ -84,13 +84,13 @@ def test_fmt_popular_분야명():
                "dates": [date(2026,5,7), date(2026,3,27)]}]
     flag, dates = fmt_popular(blocks, T)
     assert flag == "✅ 건강·의학"
-    assert dates == "2건: 05.07, 03.27"
+    assert dates == "2건: 5/7(28일 전), 3/27(69일 전)"
 
 def test_fmt_popular_접두어없음():
     blocks = [{"header": "인기글", "dates": [date(2026,6,3)]}]
     flag, dates = fmt_popular(blocks, T)
     assert flag == "✅"
-    assert dates == "1건: 06.03"
+    assert dates == "1건: 6/3(1일 전)"
 
 def test_fmt_popular_없음():
     assert fmt_popular([], T) == ("❌", "")
@@ -102,7 +102,7 @@ def test_fmt_smartblock_여러블록_줄바꿈():
     ]
     flag, text = fmt_smartblock(blocks, T)
     assert flag == "✅ 2블록"
-    assert text == "맥스콘드로이친(2): 05.14, 2025.09.18\n관절엔 콘드로이친(1): 05.31"
+    assert text == "맥스콘드로이친(2): 5/14(21일 전), 2025/9/18(259일 전)\n관절엔 콘드로이친(1): 5/31(4일 전)"
 
 def test_fmt_general():
     blocks = [
@@ -111,4 +111,4 @@ def test_fmt_general():
     ]
     flag, dates = fmt_general(blocks, T)
     assert flag == "✅ 2건"
-    assert dates == "2건: 05.30, 05.21"
+    assert dates == "2건: 5/30(5일 전), 5/21(14일 전)"
