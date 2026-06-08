@@ -776,6 +776,7 @@ class ManuscriptAssignerApp:
                         if self._write_stop:
                             break
                         ws.update(f"A{row_idx}", [[date_str]], value_input_option="USER_ENTERED")
+                        ws.update(f"C{row_idx}", [["발행"]], value_input_option="USER_ENTERED")
                         ws.update(f"N{row_idx}", [[company]], value_input_option="USER_ENTERED")
                         row_idx += 1
                         written_count += 1
@@ -1573,8 +1574,12 @@ class ManuscriptAssignerApp:
             side="left", padx=10)
 
         self.exec_log = scrolledtext.ScrolledText(
-            f, height=30, state="disabled", font=("맑은 고딕", 9))
+            f, height=25, state="disabled", font=("맑은 고딕", 9))
         self.exec_log.pack(fill="both", expand=True)
+
+        # 발행처 폴더 열기 버튼 영역
+        self.folder_btn_frame = ttk.LabelFrame(f, text="📂 발행처 폴더 열기")
+        self.folder_btn_frame.pack(fill="x", pady=(5, 0))
 
         self.next_btn.configure(state="disabled")
 
@@ -1745,8 +1750,44 @@ class ManuscriptAssignerApp:
             self.root.after(0, lambda: self.kw_sheet_btn.configure(state="normal"))
             self.root.after(0, lambda: self.exec_progress_var.set("모든 작업 완료"))
             self.root.after(0, lambda: self.status_var.set("모든 작업 완료"))
+            self.root.after(0, self._show_folder_buttons)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _show_folder_buttons(self):
+        """배정된 발행처별 폴더 열기 버튼 생성."""
+        # 기존 버튼 제거
+        for w in self.folder_btn_frame.winfo_children():
+            w.destroy()
+
+        assigned = {fo: co for fo, co in self.assignments.items() if co}
+        date_mmdd = date_to_mmdd(self.target_date)
+
+        # 배정된 발행처 목록 (중복 제거, 순서 유지)
+        companies = list(dict.fromkeys(assigned.values()))
+
+        if not companies:
+            return
+
+        for company in companies:
+            folder_name = COMPANY_FOLDERS.get(company)
+            if not folder_name:
+                continue
+            path = os.path.join(REQUEST_PATH, folder_name, date_mmdd)
+            # 배정 건수 세기
+            count = sum(1 for co in assigned.values() if co == company)
+            btn = ttk.Button(
+                self.folder_btn_frame,
+                text=f"{company} ({count}건)",
+                command=lambda p=path: self._open_folder(p))
+            btn.pack(side="left", padx=5, pady=5)
+
+    def _open_folder(self, path):
+        """폴더 열기 (없으면 안내)."""
+        if os.path.isdir(path):
+            os.startfile(path)
+        else:
+            messagebox.showwarning("경고", f"폴더가 존재하지 않습니다:\n{path}")
 
     def _update_sheet_dates(self):
         param_updates = getattr(self, 'param_updates', [])

@@ -6,10 +6,39 @@ import re
 from config import VALID_FONT_SIZES
 
 
+def _normalize_annotation(text):
+    """LLM이 자주 틀리는 서식 표현을 파서가 인식하는 형식으로 정규화"""
+    # 붙여쓰기 변형 → 띄어쓰기
+    text = re.sub(r'글자색', '글자 색', text)
+    text = re.sub(r'글씨\s*색', '글자 색', text)
+    text = re.sub(r'글자\s*크기', '글자 크기', text)
+    # 색상명 변형 → 표준명
+    text = re.sub(r'연한\s*회색', '옅은 회색', text)
+    text = re.sub(r'아주\s*옅은\s*회색', '많이 옅은 회색', text)
+    text = re.sub(r'밝은\s*회색', '옅은 회색', text)
+    text = re.sub(r'어두운\s*회색', '진한 회색', text)
+    # 형광펜 변형
+    text = re.sub(r'노란색?\s*배경', '노란 형광펜', text)
+    text = re.sub(r'파란색?\s*배경', '파란 형광펜', text)
+    text = re.sub(r'빨간색?\s*배경', '빨간 형광펜', text)
+    # 볼드 변형
+    text = re.sub(r'볼드|굵게|굵은\s*글씨', '글꼴 두껍게', text)
+    # 큰따옴표 → 작은따옴표
+    text = text.replace('"', "'").replace('"', "'").replace('"', "'")
+    return text
+
+
+def _is_closing_tag(text):
+    """ㄴ /글자크기 같은 닫는 태그인지 판별"""
+    stripped = text.lstrip('ㄴ').strip()
+    return bool(re.match(r'^/\s*(글자\s*크기|글자\s*색|글꼴|형광펜)', stripped))
+
+
 def parse_annotation(annotation_text):
     """ㄴ 서식 지시 줄 → 서식 딕셔너리"""
     from docx.enum.text import WD_COLOR_INDEX
     text = annotation_text.lstrip('ㄴ').strip()
+    text = _normalize_annotation(text)
     fmt = {
         'font_size': None,
         'bold': False,
@@ -98,11 +127,16 @@ def parse_annotation(annotation_text):
 def _is_format_annotation(text):
     """ㄴ로 시작하는 줄이 서식 지시인지 판별"""
     stripped = text.lstrip('ㄴ').strip()
+    # 닫는 태그도 서식 지시로 인식 (메인 루프에서 스킵 처리)
+    if _is_closing_tag(text):
+        return True
     if stripped.startswith('(') and stripped.endswith(')'):
         return True
-    if re.search(r'글자\s*크기|글꼴\s*두껍게|두껍게|형광펜|인용구|이탤릭|기울임|링크도구|줄\s*모두|글자\s*색', stripped):
+    # 정규화 후 판별
+    normalized = _normalize_annotation(stripped)
+    if re.search(r'글자\s*크기|글꼴\s*두껍게|두껍게|형광펜|인용구|이탤릭|기울임|링크도구|줄\s*모두|글자\s*색', normalized):
         return True
-    if re.search(r"'[^']+'\s*(빨간색|파란색|청록색|초록색|보라색|주황색|회색)", stripped):
+    if re.search(r"'[^']+'\s*(빨간색|파란색|청록색|초록색|보라색|주황색|회색)", normalized):
         return True
     return False
 
@@ -418,6 +452,9 @@ def save_as_docx(text, filepath):
 
         # ㄴ 서식 지시 줄
         if annotation_re.match(stripped) and _is_format_annotation(stripped):
+            # 닫는 태그(ㄴ /글자크기 등)는 무시
+            if _is_closing_tag(stripped):
+                continue
             fmt = parse_annotation(stripped)
             if fmt['is_image_desc']:
                 continue

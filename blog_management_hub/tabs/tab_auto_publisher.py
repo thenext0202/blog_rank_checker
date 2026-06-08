@@ -6,7 +6,6 @@ blog_post.py, sheets_handler.py는 원본 경로에서 임포트
 import json
 import os
 import re
-import sys
 import threading
 import time
 import tkinter as tk
@@ -14,26 +13,114 @@ from collections import OrderedDict
 from tkinter import messagebox, ttk
 
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from shared.gui_helpers import create_log_area
+from shared.paths import BASE_DIR, CREDENTIALS_PATH
 
-# 원본 자동발행 모듈 임포트
-_AUTO_PUB_DIR = os.path.normpath(os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "..", "블로그 자동발행"
-))
-if _AUTO_PUB_DIR not in sys.path:
-    sys.path.insert(0, _AUTO_PUB_DIR)
-
-from blog_post import NaverBlogPoster, find_element_by_selectors
-import sheets_handler
+# 번들된 자동발행 모듈 (vendor/)
+from vendor.blog_post import NaverBlogPoster, find_element_by_selectors
+from vendor import sheets_handler
 
 
 # ═══════════════════════════════════════════════════════
 #  템플릿/카테고리/발행 함수 (원본에서 가져옴, input→콜백 변환)
 # ═══════════════════════════════════════════════════════
+def _count_visible_dim(driver):
+    """현재 DOM 에서 보이는 se-popup-dim 레이어 개수 반환."""
+    try:
+        return driver.execute_script("""
+            var dims = document.querySelectorAll(
+                '.se-popup-dim, .se-popup-dim-white, .se-popup-dim-dark'
+            );
+            var n = 0;
+            for (var d of dims) {
+                var r = d.getBoundingClientRect();
+                var cs = window.getComputedStyle(d);
+                if (r.width > 0 && r.height > 0
+                    && cs.display !== 'none' && cs.visibility !== 'hidden'
+                    && cs.opacity !== '0') n++;
+            }
+            return n;
+        """)
+    except Exception:
+        return 0
+
+
+def _click_template_confirm(driver, log=print):
+    """dim 오버레이에 실제 '확인/적용' 버튼이 있으면 클릭.
+    버튼이 없으면(로딩 인디케이터일 가능성) 건드리지 않고 반환.
+    """
+    if _count_visible_dim(driver) == 0:
+        return "no_dim"
+
+    try:
+        r = driver.execute_script("""
+            var btns = document.querySelectorAll(
+                'button.se-popup-button-confirm,'
+                + ' button.se-popup-button-apply,'
+                + ' button[class*="popup-button-confirm"],'
+                + ' button[class*="popup-button-apply"],'
+                + ' .se-popup-container button'
+            );
+            for (var b of btns) {
+                var r = b.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;
+                var txt = (b.textContent || '').trim();
+                var aria = b.getAttribute('aria-label') || '';
+                if (/확인|적용|불러오기|예|네/.test(txt + ' ' + aria)) {
+                    b.click();
+                    return 'clicked:' + (txt || aria || 'btn');
+                }
+            }
+            return 'no_button';
+        """)
+        if r and str(r).startswith("clicked"):
+            log(f"  템플릿 확인 버튼 클릭: {r}")
+            time.sleep(0.6)
+            return "clicked"
+    except Exception as e:
+        log(f"  [주의] 확인 버튼 클릭 중 예외: {e}")
+    return "loading_or_no_button"
+
+
+def _wait_for_dim_gone(driver, timeout=60, log=print, template_name=""):
+    """dim 오버레이가 DOM에서 보이지 않을 때까지 폴링 대기.
+    양이 많은 템플릿은 로딩이 오래 걸리므로 기본 60초까지 기다림.
+    10초마다 진행 로그를 찍어 사용자에게 "살아있음"을 알림.
+    """
+    deadline = time.time() + timeout
+    start = time.time()
+    last_log = 0.0
+    while time.time() < deadline:
+        if _count_visible_dim(driver) == 0:
+            elapsed = time.time() - start
+            if elapsed > 1.0:
+                log(f"  템플릿 로딩 완료 ({elapsed:.1f}초)")
+            return True
+        elapsed = time.time() - start
+        if elapsed - last_log >= 10:
+            log(f"  템플릿 로딩 중... ({int(elapsed)}초 경과)")
+            last_log = elapsed
+        time.sleep(0.5)
+
+    # 타임아웃 — 마지막 수단으로 ESC 한 번
+    log(f"  [주의] 템플릿 로딩이 {timeout}초 내에 완료되지 않음 — ESC 시도")
+    try:
+        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+        time.sleep(1)
+        if _count_visible_dim(driver) == 0:
+            log("  ESC 로 dim 레이어 해제됨")
+            return True
+    except Exception:
+        pass
+    log("  [!] dim 레이어가 여전히 남아있음 — 제목 클릭 실패 가능")
+    return False
+
+
 def apply_template(driver, template_name, log=print, ask_manual=None):
     """네이버 에디터에서 저장 템플릿 적용"""
     log(f"  템플릿 적용: {template_name}")
@@ -116,7 +203,12 @@ def apply_template(driver, template_name, log=print, ask_manual=None):
 
             if result == "found":
                 log(f"  템플릿 선택: {template_name}")
-                time.sleep(1)
+                time.sleep(1.5)
+                # ① 실제 확인 버튼이 있으면 클릭 (팝업 확인 모달 케이스)
+                _click_template_confirm(driver, log=log)
+                # ② 로딩 오버레이가 사라질 때까지 최대 60초 대기
+                _wait_for_dim_gone(driver, timeout=60, log=log,
+                                   template_name=template_name)
                 log("  템플릿 적용 완료!")
                 return True
             elif result in ("end", "no_container"):
@@ -256,20 +348,21 @@ class AutoPublisherTab(ttk.Frame):
         self._build()
 
     def _load_config(self):
-        """자동발행 config.json 로드"""
-        config_path = os.path.join(_AUTO_PUB_DIR, "config.json")
+        """자동발행 config.json 로드 (EXE/스크립트 루트 옆)"""
+        config_path = os.path.join(BASE_DIR, "auto_publisher_config.json")
+        # 기본 컬럼 매핑: 시트 B~G열 = 블로그ID/키워드/제목/URL/카테고리/공개
         defaults = {
             "sheet_id": "",
-            "tab_name": "템플릿 자동발행",
-            "blog_id_col": "A",
-            "keyword_col": "B",
-            "title_col": "C",
-            "publish_url_col": "D",
+            "tab_name": "블로그 템플릿 발행",
+            "blog_id_col": "B",
+            "keyword_col": "C",
+            "title_col": "D",
+            "publish_url_col": "E",
             "start_row": 2,
-            "credentials_path": "../manuscript_generator/credentials.json",
-            "template_name_col": "B",
-            "category_col": "E",
-            "public_col": "F",
+            "credentials_path": CREDENTIALS_PATH,
+            "template_name_col": "C",
+            "category_col": "F",
+            "public_col": "G",
             "skip_title_input": False,
             "publish_delay_sec": 3,
         }
@@ -377,7 +470,7 @@ class AutoPublisherTab(ttk.Frame):
             try:
                 cred_path = config["credentials_path"]
                 if not os.path.isabs(cred_path):
-                    cred_path = os.path.normpath(os.path.join(_AUTO_PUB_DIR, cred_path))
+                    cred_path = os.path.normpath(os.path.join(BASE_DIR, cred_path))
                 if not os.path.exists(cred_path):
                     self.log(f"[에러] 인증 파일 없음: {cred_path}")
                     return

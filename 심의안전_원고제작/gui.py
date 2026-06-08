@@ -11,7 +11,7 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 
 from config import VERSION, THEME, OUTPUT_DIR, LOG_FILE, REFERENCES_DIR
-from claude_api import call_claude_api
+from claude_api import call_claude_api, MODEL_MAP
 from sheets_loader import (
     connect_sheet, load_all_from_sheet, load_refs_for_product,
     save_sheet_id, load_sheet_id, save_api_key, load_api_key,
@@ -192,10 +192,10 @@ class SafetyManuscriptApp:
         ttk.Combobox(row2, textvariable=self.quote_var, state='readonly', width=5,
                      values=["1", "2", "3", "4", "5", "6"]).grid(row=0, column=col, sticky='w', padx=(0, 15)); col += 1
 
-        self.toc_var = tk.BooleanVar(value=True)
+        self.toc_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(row2, text="목차 포함", variable=self.toc_var).grid(row=0, column=col, sticky='w', padx=(0, 15)); col += 1
 
-        self.title_repeat_var = tk.BooleanVar(value=True)
+        self.title_repeat_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(row2, text="제목 3번 반복", variable=self.title_repeat_var).grid(row=0, column=col, sticky='w')
 
         # ── 심의안전: 키워드그룹 & 강조점 ──
@@ -218,9 +218,9 @@ class SafetyManuscriptApp:
         row4.pack(fill=tk.X, padx=10, pady=5)
 
         ttk.Label(row4, text="글자수:").grid(row=0, column=0, sticky='e', padx=(0, 5))
-        self.charcount_var = tk.StringVar(value="2000~2300")
+        self.charcount_var = tk.StringVar(value="1800~2000")
         ttk.Combobox(row4, textvariable=self.charcount_var, state='readonly', width=12,
-                     values=["1500~1800", "2000~2300", "2500~2800", "3000~3300",
+                     values=["1500~1800", "1800~2000", "2000~2300", "2500~2800", "3000~3300",
                              "3500~3800", "4000~4300", "4500~4800", "5100~5400"]).grid(row=0, column=1, sticky='w', padx=(0, 15))
 
         ttk.Label(row4, text="이미지:").grid(row=0, column=2, sticky='e', padx=(0, 5))
@@ -228,9 +228,14 @@ class SafetyManuscriptApp:
         ttk.Entry(row4, textvariable=self.imgcount_var, width=6).grid(row=0, column=3, sticky='w', padx=(0, 15))
 
         ttk.Label(row4, text="강조 크기:").grid(row=0, column=4, sticky='e', padx=(0, 5))
-        self.emphasis_fontsize_var = tk.StringVar(value="16")
+        self.emphasis_fontsize_var = tk.StringVar(value="19")
         ttk.Combobox(row4, textvariable=self.emphasis_fontsize_var, state='readonly', width=5,
-                     values=["11", "13", "15", "16", "19", "24", "28"]).grid(row=0, column=5, sticky='w')
+                     values=["11", "13", "15", "16", "19", "24", "28"]).grid(row=0, column=5, sticky='w', padx=(0, 15))
+
+        ttk.Label(row4, text="모델:").grid(row=0, column=6, sticky='e', padx=(0, 5))
+        self.model_var = tk.StringVar(value="Sonnet 4 (빠름)")
+        ttk.Combobox(row4, textvariable=self.model_var, state='readonly', width=16,
+                     values=["Sonnet 4 (빠름)", "Opus 4 (고품질)"]).grid(row=0, column=7, sticky='w')
 
         # ── 색상 규칙 ──
         row5 = ttk.LabelFrame(sc, text="색상 규칙", padding=10)
@@ -442,12 +447,16 @@ class SafetyManuscriptApp:
 
     def _update_safety_preview(self):
         product = self.product_var.get()
-        points = self.sheet_data.get("safety_appeals", {}).get(product, [])
+        points = self.sheet_data.get("safety_appeals", {}).get(product, "")
         self.safety_preview.config(state='normal')
         self.safety_preview.delete('1.0', tk.END)
         if points:
-            lines = [f"{i+1}. {p}" for i, p in enumerate(points)]
-            self.safety_preview.insert('1.0', "\n".join(lines))
+            # 문자열이면 그대로, 리스트면 번호 붙여서 표시
+            if isinstance(points, list):
+                text = "\n".join(f"{i+1}. {p}" for i, p in enumerate(points))
+            else:
+                text = str(points)
+            self.safety_preview.insert('1.0', text)
         else:
             self.safety_preview.insert('1.0', "(이 제품의 소구점이 없습니다)")
         self.safety_preview.config(state='disabled')
@@ -474,7 +483,12 @@ class SafetyManuscriptApp:
             lines.append(f"  ▶ {name}")
         lines.append(f"\n══ 심의안전 소구점 ({len(sa)}개 제품) ══")
         for pname, points in sa.items():
-            lines.append(f"  ▶ {pname}: {len(points)}개 소구점")
+            if isinstance(points, list):
+                lines.append(f"  ▶ {pname}: {len(points)}개 소구점")
+            else:
+                # 문자열: 앞 30자 미리보기
+                preview = str(points)[:30].replace('\n', ' ')
+                lines.append(f"  ▶ {pname}: {preview}...")
 
         lines.append(f"\n══ 스타일 ({len(d['styles'])}개) ══")
         paper_count = sum(len(v) for v in d.get('papers', {}).values())
@@ -531,11 +545,13 @@ class SafetyManuscriptApp:
         inp = self._gather_inputs()
         if not inp:
             return
-        prompt, sample_used = self._build_prompt_from_inputs(inp)
+        system_prompt, user_prompt, sample_used = self._build_prompt_from_inputs(inp)
+        # 미리보기에서는 system + user 모두 표시
+        preview = f"===== SYSTEM PROMPT =====\n{system_prompt}\n\n===== USER PROMPT =====\n{user_prompt}"
         self.result_text.delete('1.0', tk.END)
-        self.result_text.insert('1.0', prompt)
+        self.result_text.insert('1.0', preview)
         self._highlight_result()
-        self.status_var.set(f"프롬프트 미리보기 ({len(prompt):,}자)")
+        self.status_var.set(f"프롬프트 미리보기 (system {len(system_prompt):,}자 + user {len(user_prompt):,}자)")
 
     def _build_prompt_from_inputs(self, inp):
         """inp 딕셔너리로 build_prompt 호출"""
@@ -568,7 +584,7 @@ class SafetyManuscriptApp:
         if not inp:
             return
 
-        prompt, sample_used = self._build_prompt_from_inputs(inp)
+        system_prompt, user_prompt, sample_used = self._build_prompt_from_inputs(inp)
 
         self.is_generating = True
         self._set_buttons_state('disabled')
@@ -582,6 +598,10 @@ class SafetyManuscriptApp:
                 clean = result.replace('**', '')
                 clean = re.sub(r'^ㄴ\s*\([^)]+\)\s*$', '', clean, flags=re.MULTILINE)
                 clean = re.sub(r'^0(\d)$', r'\1', clean, flags=re.MULTILINE)
+                # 사전 확인 블록 제거 (워드 출력에 불필요)
+                clean = re.sub(r'^\[사전\s*확인\].*?(?=^---\s*\n\s*★)', '', clean, flags=re.MULTILINE | re.DOTALL)
+                # HTML 태그 제거 (Claude가 <span> 등 출력하는 경우)
+                clean = re.sub(r'<[^>]+>', '', clean)
 
                 self.result_text.delete('1.0', tk.END)
                 self.result_text.insert('1.0', clean)
@@ -603,8 +623,10 @@ class SafetyManuscriptApp:
                 self._set_buttons_state('normal')
             self.root.after(0, update)
 
+        selected_model = MODEL_MAP.get(self.model_var.get(), "claude-sonnet-4-20250514")
         threading.Thread(target=call_claude_api,
-                         args=(api_key, prompt, on_complete, on_error),
+                         args=(api_key, user_prompt, on_complete, on_error),
+                         kwargs={"system_prompt": system_prompt, "model": selected_model},
                          daemon=True).start()
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -744,8 +766,10 @@ class SafetyManuscriptApp:
                 messagebox.showerror("검수 오류", f"검수 중 오류가 발생했습니다:\n{err}")
             self.root.after(0, update)
 
+        selected_model = MODEL_MAP.get(self.model_var.get(), "claude-sonnet-4-20250514")
         threading.Thread(target=call_claude_api,
                          args=(api_key, review_prompt, on_review_complete, on_review_error, 4096),
+                         kwargs={"model": selected_model},
                          daemon=True).start()
 
     def _build_review_prompt(self, manuscript, product, product_guide,
@@ -794,8 +818,11 @@ class SafetyManuscriptApp:
             parts.append(f"\n[제품 가이드 (소구점 기준)]\n{product_guide[:5000]}")
         if safety_points:
             parts.append("\n[심의안전 소구점]")
-            for i, pt in enumerate(safety_points, 1):
-                parts.append(f"  {i}. {pt}")
+            if isinstance(safety_points, list):
+                for i, pt in enumerate(safety_points, 1):
+                    parts.append(f"  {i}. {pt}")
+            else:
+                parts.append(f"  {safety_points}")
         if keywords:
             parts.append(f"\n[메인 키워드] {keywords}")
         if sub_keywords:
@@ -918,6 +945,10 @@ class SafetyManuscriptApp:
                 clean = result.replace('**', '')
                 clean = re.sub(r'^ㄴ\s*\([^)]+\)\s*$', '', clean, flags=re.MULTILINE)
                 clean = re.sub(r'^0(\d)$', r'\1', clean, flags=re.MULTILINE)
+                # 사전 확인 블록 제거 (워드 출력에 불필요)
+                clean = re.sub(r'^\[사전\s*확인\].*?(?=^---\s*\n\s*★)', '', clean, flags=re.MULTILINE | re.DOTALL)
+                # HTML 태그 제거 (Claude가 <span> 등 출력하는 경우)
+                clean = re.sub(r'<[^>]+>', '', clean)
 
                 self.result_text.delete('1.0', tk.END)
                 self.result_text.insert('1.0', clean)
@@ -940,8 +971,10 @@ class SafetyManuscriptApp:
                 self._set_buttons_state('normal')
             self.root.after(0, update)
 
+        selected_model = MODEL_MAP.get(self.model_var.get(), "claude-sonnet-4-20250514")
         threading.Thread(target=call_claude_api,
                          args=(api_key, revise_prompt, on_complete, on_error, 8192),
+                         kwargs={"model": selected_model},
                          daemon=True).start()
 
     def _build_revise_prompt(self, original_manuscript, review_result):

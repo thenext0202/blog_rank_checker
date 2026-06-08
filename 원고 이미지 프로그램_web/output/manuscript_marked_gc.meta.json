@@ -1,0 +1,7 @@
+{
+  "manuscript": "manuscript_marked_gc.md",
+  "total_slots": 14,
+  "recommendation_blocks": [
+    {"start_line": 255, "end_line": 259}
+  ]
+}

@@ -66,20 +66,7 @@ def load_all_from_sheet(spreadsheet):
     except Exception:
         pass
 
-    # 공통지침 — 심의안전에서는 SAFETY_GUIDELINES 상수 사용 (충돌 방지)
-
-    # 제품소구점 → A:제품명, B:가이드, C:링크, D:약어(제품코드)
-    try:
-        ws = spreadsheet.worksheet("제품소구점")
-        for row in ws.get_all_values()[1:]:
-            if len(row) >= 2 and row[0].strip():
-                data["products"][row[0].strip()] = row[1].strip()
-                if len(row) >= 3 and row[2].strip():
-                    data["product_links"][row[0].strip()] = row[2].strip()
-                if len(row) >= 4 and row[3].strip():
-                    data["product_codes"][row[0].strip()] = row[3].strip()
-    except Exception:
-        pass
+    # 공통지침 — 심의안전에서는 system prompt 사용 (충돌 방지)
 
     # 서식규칙
     try:
@@ -114,38 +101,38 @@ def load_all_from_sheet(spreadsheet):
 
     # ━━━ 심의안전 전용 탭 ━━━
 
-    # 심의안전_프롬프트 → A:유형명, B:프롬프트 (A가 비면 이전 유형에 이어붙임)
+    # 심의안전_프롬프트 → A:유형명, B:system prompt, C:user prompt 템플릿
+    # safety_prompts = {유형명: {"system": ..., "user_template": ...}}
     try:
         ws = spreadsheet.worksheet("심의안전_프롬프트")
-        current_type = None
         for row in ws.get_all_values()[1:]:
-            b_val = row[1].strip() if len(row) >= 2 else ""
-            if row[0].strip():
-                current_type = row[0].strip()
-                data["safety_prompts"][current_type] = b_val
-            elif current_type and b_val:
-                data["safety_prompts"][current_type] += "\n" + b_val
+            if len(row) >= 2 and row[0].strip():
+                type_name = row[0].strip()
+                system_val = row[1].strip() if len(row) >= 2 else ""
+                user_val = row[2].strip() if len(row) >= 3 else ""
+                data["safety_prompts"][type_name] = {
+                    "system": system_val,
+                    "user_template": user_val,
+                }
     except Exception:
         pass
 
-    # 심의안전_소구점 → A:제품명, B:키워드그룹명, C:강조점 조합, D:강조점A, E:강조점B, F:강조점C
+    # 심의 소구점 → A:제품명, B:소구점(한 셀), C:링크, D:약어
     try:
-        ws = spreadsheet.worksheet("심의안전_소구점")
+        ws = spreadsheet.worksheet("심의 소구점")
         for row in ws.get_all_values()[1:]:
-            if len(row) >= 4 and row[0].strip() and row[1].strip():
+            if len(row) >= 2 and row[0].strip():
                 pname = row[0].strip()
-                if pname not in data["safety_appeals"]:
-                    data["safety_appeals"][pname] = []
-                entry = {
-                    "group": row[1].strip(),
-                    "combo": row[2].strip() if len(row) >= 3 else "",
-                    "points": {
-                        "A": row[3].strip() if len(row) >= 4 else "",
-                        "B": row[4].strip() if len(row) >= 5 else "",
-                        "C": row[5].strip() if len(row) >= 6 else "",
-                    }
-                }
-                data["safety_appeals"][pname].append(entry)
+                appeal = row[1].strip() if len(row) >= 2 else ""
+                link = row[2].strip() if len(row) >= 3 else ""
+                code = row[3].strip() if len(row) >= 4 else ""
+                if appeal:
+                    data["safety_appeals"][pname] = appeal
+                    data["products"][pname] = appeal
+                if link:
+                    data["product_links"][pname] = link
+                if code:
+                    data["product_codes"][pname] = code
     except Exception:
         pass
 

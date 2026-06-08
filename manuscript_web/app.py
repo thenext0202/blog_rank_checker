@@ -1,6 +1,7 @@
 """블록 원고 생성기 — Flask 웹 API (Railway 배포)."""
 import os
 import re
+import atexit
 import base64
 import tempfile
 import datetime
@@ -9,6 +10,7 @@ from urllib.parse import quote
 from flask import Flask, request, jsonify, render_template, Response
 
 # Google 서비스 계정 인증 (환경변수 base64 디코딩)
+# 임시파일은 프로세스 종료 시 자동 삭제 (인증 정보 디스크 잔존 방지)
 _cred_env = os.environ.get("GOOGLE_CREDENTIALS_B64", "")
 if _cred_env:
     _tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="wb")
@@ -16,15 +18,26 @@ if _cred_env:
     _tmp.close()
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _tmp.name
 
+    def _cleanup_cred_tmp(path=_tmp.name):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+    atexit.register(_cleanup_cred_tmp)
+
 import config
 from api_client import call_claude_api, MODELS
 from prompt_builder import build_system_prompt, build_user_prompt
 from output_parser import parse
 from docx_writer import build_docx_bytes
-from drive_uploader import upload_docx_bytes
+from html_formatter import build_html_preview
+from docx_formatter import normalize_text
 from sheet_writer import (
-    write_row, _open_ws, DEFAULT_TAB_NAME,
+    write_row, clear_row, _open_ws, DEFAULT_TAB_NAME,
     load_product_links, build_product_link,
+    update_l_column_bulk,
+    load_keyword_recommendations,
 )
 
 app = Flask(__name__)
@@ -36,6 +49,8 @@ API_SECRET = os.environ.get("API_SECRET", "")
 _SYSTEM_PROMPT = None
 # 제품 링크 마스터 캐시 (시트에서 1회 로드) — 수동 새로고침은 /reload_products
 _PRODUCT_LINKS = None
+# 추천 키워드 캐시 — 새로고침은 /recommend_keywords?refresh=1
+_KEYWORD_RECS = None
 
 
 def get_system_prompt():
@@ -50,6 +65,13 @@ def get_product_links():
     if _PRODUCT_LINKS is None:
         _PRODUCT_LINKS = load_product_links()
     return _PRODUCT_LINKS
+
+
+def get_keyword_recommendations(force_reload=False):
+    global _KEYWORD_RECS
+    if _KEYWORD_RECS is None or force_reload:
+        _KEYWORD_RECS = load_keyword_recommendations()
+    return _KEYWORD_RECS
 
 
 def _auth_check(req):
@@ -88,6 +110,228 @@ def index():
     )
 
 
+@app.route("/test", methods=["GET"])
+def test_page():
+    # 편집창 서식 로직 자동 검증 페이지. 실제 index.html을 iframe으로 띄워
+    # 샘플 원고·선택 범위·버튼 클릭을 자동으로 재현하고 결과를 비교한다.
+    return render_template("test_format.html", version=config.VERSION)
+
+
+@app.route("/test_preview", methods=["POST"])
+def test_preview():
+    """테스트 페이지 전용 미리보기 프록시 (인증 없음, localhost 개발용)."""
+    from html_formatter import build_html_preview
+    data = request.get_json(silent=True) or {}
+    title = data.get("title", "") or ""
+    body = data.get("body", "") or ""
+    if not body.strip():
+        return jsonify({"error": "body가 비어 있습니다."}), 400
+    try:
+        html = build_html_preview(title, body)
+        return jsonify({"html": html})
+    except Exception as e:
+        return jsonify({"error": f"미리보기 생성 실패: {e}"}), 500
+
+
+@app.route("/test_format_apply", methods=["POST"])
+def test_format_apply():
+    """테스트 페이지 전용 — 짧은 원고에 LLM이 서식 지침 적용 (Phase A~D 생략, E만).
+
+    /generate 는 전체 원고를 새로 쓰느라 수분 걸림. 이 엔드포인트는 사용자가
+    이미 작성한 짧은 원고(5줄 내외)에 `ㄴ 주석`·`**볼드**`만 덧붙여 돌려준다.
+    """
+    if not API_KEY:
+        return jsonify({"error": "ANTHROPIC_API_KEY 미설정"}), 500
+    data = request.get_json(silent=True) or {}
+    body = (data.get("body") or "").strip()
+    product = data.get("product") or ""
+    model_key = data.get("model") or "Sonnet"  # 속도 기본 Sonnet, 품질 원하면 Opus
+    if not body:
+        return jsonify({"error": "body가 비었습니다"}), 400
+
+    # 서식 지침(모듈7) 로드
+    inst_dir = config.load_instructions_dir() or config.DEFAULT_INSTRUCTIONS_DIR
+    formatting_path = os.path.join(inst_dir, config.MODULE_FILES["formatting"])
+    try:
+        with open(formatting_path, "r", encoding="utf-8") as f:
+            formatting_guide = f.read()
+    except FileNotFoundError:
+        formatting_guide = "(서식 지침 파일 없음 — 기본 규칙으로 처리)"
+
+    system_prompt = (
+        "너는 블록 원고 서식 전문가다. 사용자가 준 짧은 원고에, 아래 서식 지침에 따라 "
+        "`ㄴ 주석`과 `**볼드**` 표식만 덧붙여서 돌려준다.\n\n"
+        "[중요 출력 규칙]\n"
+        "- 원본 문장 내용·순서 그대로 유지\n"
+        "- 원본의 빈 줄(문단 분리)은 **반드시 그대로 유지**\n"
+        "- 본문 라인 아래 `ㄴ 주석`으로 색상·형광펜·밑줄·볼드·인용구 지시\n"
+        "- **같은 문단(연속 본문 라인) 안에는 `ㄴ 주석` 한 개만**. 줄마다 ㄴ + 빈 줄 반복 금지\n"
+        "- 문단이 바뀌면 빈 줄 1줄로 분리 (원본의 문단 구조 존중)\n"
+        "- 배합명/성분명 등 특정 단어만 강조는 `ㄴ '단어' 색상 형광펜, 볼드` 형태\n"
+        "- 결과는 주석 섞인 원고 텍스트만 반환 — 설명·코드블록·서두·Phase 헤더 금지\n\n"
+        "[블록 묶음 예시]\n"
+        "잘못된 출력 (문단 안 줄마다 ㄴ + 빈 줄):\n"
+        "  의사선생님도 모르겠다고 하신다.\n"
+        "  ㄴ 빨간색\n"
+        "\n"
+        "  정말 답답함 그 자체다.\n"
+        "  ㄴ 빨간색\n"
+        "\n"
+        "올바른 출력 (한 문단 안엔 ㄴ 한 개, 문단 경계 빈 줄 유지):\n"
+        "  의사선생님도 모르겠다고 하신다.\n"
+        "  정말 답답함 그 자체다.\n"
+        "  뭐가 문제일까?\n"
+        "  ㄴ 빨간색\n"
+        "\n"
+        "  (다음 문단은 여기서 시작)\n\n"
+        "=== 서식 지침 (모듈7) ===\n"
+        + formatting_guide
+    )
+    user_prompt = (
+        f"제품: {product or '(지정 없음)'}\n\n"
+        f"[원고]\n{body}\n\n"
+        "위 원고에 서식 지침을 적용해 `ㄴ 주석`·`**볼드**`만 덧붙인 결과를 반환해줘."
+    )
+
+    holder = {"text": "", "error": None}
+    call_claude_api(
+        API_KEY, system_prompt, user_prompt,
+        lambda text, meta: holder.update({"text": text}),
+        lambda err: holder.update({"error": err}),
+        model_key=model_key, max_tokens=4000,
+    )
+    if holder["error"]:
+        return jsonify({"error": holder["error"]}), 500
+
+    raw = (holder["text"] or "").strip()
+    # LLM이 각 줄마다 ㄴ + 빈 줄 넣는 경향 방어 — 연속 본문-ㄴ-빈줄 패턴 압축
+    raw = _collapse_llm_over_spacing(raw)
+    # 파서 체인 + 줄 길이 정규화 (실제 /generate 흐름과 동일)
+    import output_parser
+    result = output_parser._em_dash_to_quote(raw)
+    result = output_parser._normalize_quotes_in_annotations(result)
+    result = output_parser._split_sentences_after_period(result)
+    result = output_parser._enforce_product_ingredient_format(result, product or None)
+    result = normalize_text(result)
+    return jsonify({"result": result, "raw_llm": raw, "model": model_key})
+
+
+def _collapse_llm_over_spacing(text):
+    """LLM이 과하게 `본문\\nㄴ 주석\\n(빈 줄)\\n본문\\nㄴ 주석` 식으로 출력한 경우
+    연속 ㄴ 주석 블록을 모아 마지막 한 줄로 압축.
+
+    같은 색상·볼드 조합(공통 서식)만 남기고 나머지는 드롭 — 보수적 병합.
+    다른 서식(예: 인용구)은 건드리지 않음.
+    """
+    import re as _re
+    if not text:
+        return text
+    lines = text.split("\n")
+    out = []
+    i = 0
+    # 패턴: (본문)(빈 줄*)(ㄴ 색/볼드)(빈 줄*) 반복 2회 이상
+    SIMPLE_ANN = _re.compile(
+        r"^ㄴ\s+(?:[\w가-힣\s,]+)?(빨간색|파란색|청록색|초록색|보라색|주황색|회색|하늘색|노란색)"
+        r"(?:\s*형광펜)?(?:\s*,\s*볼드)?(?:\s*,\s*밑줄)?\s*$"
+    )
+    while i < len(lines):
+        # 본문 라인 감지
+        s = lines[i].strip()
+        if not s or s.startswith("ㄴ") or s.startswith("★") or _re.match(r"^[─—–\-=_]{3,}$", s):
+            out.append(lines[i])
+            i += 1
+            continue
+        # 본문 시작 → 같은 "문단" (빈 줄 없이 이어지는) 안에서만 ㄴ 수집
+        # 빈 줄 만나면 즉시 블록 종료 (문단 경계 존중)
+        bodies = []
+        anns = []
+        j = i
+        while j < len(lines):
+            t = lines[j].strip()
+            if not t:
+                break  # 문단 경계 (빈 줄) 도달 → 압축 중단, 빈 줄은 out에 그대로 나감
+            if t.startswith("ㄴ"):
+                if SIMPLE_ANN.match(t):
+                    anns.append(t)
+                    j += 1
+                    continue
+                break  # 복잡한 ㄴ (타겟 있는, 인용구 등) → 블록 종료
+            # 본문 라인
+            bodies.append(lines[j])
+            j += 1
+        # 압축 조건: 본문 2줄 이상 + 단일 서식 ㄴ 2개 이상
+        if len(bodies) >= 2 and len(anns) >= 2:
+            # 공통 핵심 색상(첫 ㄴ 기준)만 추출
+            first_ann = anns[0]
+            color_m = _re.search(r"(빨간색|파란색|청록색|초록색|보라색|주황색|회색|하늘색|노란색)", first_ann)
+            is_hl = "형광펜" in first_ann
+            if color_m:
+                merged = f"ㄴ {color_m.group(1)}" + (" 형광펜" if is_hl else "")
+                out.extend(bodies)
+                out.append(merged)
+                i = j
+                continue
+        # 압축 안 함 — 원본 그대로
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+@app.route("/test_hook", methods=["POST"])
+def test_hook():
+    """output_parser 후처리 함수를 단건 호출해 결과를 반환 — 테스트 페이지 전용."""
+    import output_parser
+    data = request.get_json(silent=True) or {}
+    func = data.get("func", "")
+    body = data.get("body", "") or ""
+    product = data.get("product")
+    keyword = data.get("keyword")
+    try:
+        if func == "enforce":
+            result = output_parser._enforce_product_ingredient_format(body, product)
+        elif func == "inject_keyword":
+            result = output_parser._inject_keyword_target(body, keyword)
+        elif func == "split_sentences":
+            result = output_parser._split_sentences_after_period(body)
+        elif func == "parse_body":
+            # Phase E body 후처리 체인과 동일 순서 (parse() L549~ 와 일치)
+            result = output_parser._em_dash_to_quote(body)
+            result = output_parser._normalize_quotes_in_annotations(result)
+            result = output_parser._split_sentences_after_period(result)
+            result = output_parser._enforce_product_ingredient_format(result, product)
+            result = output_parser._merge_same_target_annotations(result)
+            result = output_parser._inject_keyword_target(result, keyword)
+        elif func == "full_pipeline":
+            # 실제 /generate 흐름 재현: parse 체인 + normalize_text(줄 길이 28자 정리)
+            from docx_formatter import normalize_text
+            result = output_parser._em_dash_to_quote(body)
+            result = output_parser._normalize_quotes_in_annotations(result)
+            result = output_parser._split_sentences_after_period(result)
+            result = output_parser._enforce_product_ingredient_format(result, product)
+            result = output_parser._merge_same_target_annotations(result)
+            result = output_parser._inject_keyword_target(result, keyword)
+            result = normalize_text(result)
+        elif func == "parse_annotation":
+            # docx_formatter.parse_annotation 단건 검증 (v2.1.6~ 슬래시 분할 등)
+            from docx_formatter import parse_annotation as _pa
+            fmt = _pa(body)
+            result = {
+                "colored_words": fmt.get("colored_words", []),
+                "highlighted_words": [(w, str(c)) for w, c in fmt.get("highlighted_words", [])],
+                "bolded_words": fmt.get("bolded_words", []),
+                "underlined_words": fmt.get("underlined_words", []),
+                "target_words": fmt.get("target_words", []),
+                "full_text_color": fmt.get("full_text_color"),
+                "highlight": str(fmt.get("highlight")) if fmt.get("highlight") else None,
+                "bold": fmt.get("bold"),
+            }
+        else:
+            return jsonify({"error": f"unknown func: {func}"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"result": result})
+
+
 @app.route("/products", methods=["GET"])
 def products():
     return jsonify({"products": config.PRODUCT_NAMES})
@@ -105,6 +349,18 @@ def reload_products():
     global _PRODUCT_LINKS
     _PRODUCT_LINKS = load_product_links()
     return jsonify({"ok": True, "count": len(_PRODUCT_LINKS)})
+
+
+@app.route("/recommend_keywords", methods=["GET"])
+def recommend_keywords():
+    """'키워드 전광판' 탭의 추천 키워드 조회.
+
+    - 페이지 로드 시 1회 캐시 사용
+    - ?refresh=1 → 시트 다시 읽어 캐시 갱신
+    """
+    refresh = request.args.get("refresh", "") == "1"
+    data = get_keyword_recommendations(force_reload=refresh)
+    return jsonify({"recommendations": data})
 
 
 @app.route("/generate", methods=["POST"])
@@ -166,11 +422,14 @@ def generate():
     except Exception:
         pass
 
-    parsed = parse(holder["text"])
+    parsed = parse(holder["text"], product=product, keyword=keyword)
+
+    # 편집창 = 미리보기/워드 출력 결과 일치 보장 — 본문 줄바꿈 정규화 후 반환
+    normalized_body = normalize_text(parsed["body"])
 
     return jsonify({
         "title": parsed["title"],
-        "body": parsed["body"],
+        "body": normalized_body,
         "char_count": parsed["char_count"],
         "style": parsed["style"],
         "blocks_summary": parsed["blocks_summary"],
@@ -185,6 +444,104 @@ def generate():
             "writer": writer,
             "date": date_str,
             "model": model_key,
+        },
+    })
+
+
+@app.route("/raw_files", methods=["GET"])
+def raw_files():
+    """output 폴더의 *_raw.txt 파일 목록 (최신순) — 재처리 UI 용."""
+    out_dir = config.OUTPUT_DIR
+    files = []
+    try:
+        for fn in os.listdir(out_dir):
+            if not fn.endswith("_raw.txt"):
+                continue
+            path = os.path.join(out_dir, fn)
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            # 파일명 형식: {YYYYMMDD_HHMMSS}_{keyword}_raw.txt
+            m = re.match(r"^(\d{8}_\d{6})_(.+)_raw\.txt$", fn)
+            ts_disp = m.group(1) if m else ""
+            kw_guess = m.group(2) if m else ""
+            files.append({
+                "filename": fn,
+                "ts": ts_disp,
+                "keyword_guess": kw_guess,
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+            })
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
+    files.sort(key=lambda f: f["mtime"], reverse=True)
+    return jsonify({"files": files[:50]})  # 최신 50개만
+
+
+@app.route("/reprocess", methods=["POST"])
+def reprocess():
+    """기존 raw 파일을 LLM 호출 없이 다시 parse → 편집창에 표시.
+
+    /generate 와 같은 응답 형식. raw 파일은 새로 저장하지 않음.
+    """
+    if not _auth_check(request):
+        return jsonify({"error": "인증 실패"}), 403
+
+    data = request.get_json(force=True) or {}
+    filename = (data.get("filename") or "").strip()
+    keyword = (data.get("keyword") or "").strip()
+    product = (data.get("product") or "").strip()
+    link = (data.get("link") or "").strip()
+    writer = (data.get("writer") or "").strip()
+    nt_medium = (data.get("nt_medium") or "").strip()
+    date_str = (data.get("date") or "").strip()
+    model_key = (data.get("model") or "Opus").strip()
+
+    if not filename:
+        return jsonify({"error": "filename 필수"}), 400
+    # 보안: 경로 분리자/상위 이동 금지
+    if "/" in filename or "\\" in filename or ".." in filename:
+        return jsonify({"error": "잘못된 파일명"}), 400
+    if not filename.endswith("_raw.txt"):
+        return jsonify({"error": "raw 파일이 아님"}), 400
+
+    raw_path = os.path.join(config.OUTPUT_DIR, filename)
+    if not os.path.isfile(raw_path):
+        return jsonify({"error": f"파일 없음: {filename}"}), 404
+
+    try:
+        with open(raw_path, "r", encoding="utf-8") as f:
+            raw_text = f.read()
+    except OSError as e:
+        return jsonify({"error": f"파일 읽기 실패: {e}"}), 500
+
+    # 파일명에서 keyword 추출 (요청에 없으면)
+    if not keyword:
+        m = re.match(r"^\d{8}_\d{6}_(.+)_raw\.txt$", filename)
+        if m:
+            keyword = m.group(1)
+
+    parsed = parse(raw_text, product=product or None, keyword=keyword or None)
+    normalized_body = normalize_text(parsed["body"])
+
+    return jsonify({
+        "title": parsed["title"],
+        "body": normalized_body,
+        "char_count": parsed["char_count"],
+        "style": parsed["style"],
+        "blocks_summary": parsed["blocks_summary"],
+        "review": parsed["review"],
+        "phases": parsed["phases"],
+        "usage": {"actual_model": "(재처리 — LLM 호출 없음)"},
+        "meta": {
+            "keyword": keyword,
+            "product": product,
+            "link": link,
+            "writer": writer,
+            "date": date_str,
+            "model": model_key,
+            "reprocessed_from": filename,
         },
     })
 
@@ -205,6 +562,7 @@ def write_sheet_route():
     title = data.get("title") or ""
     body = data.get("body") or ""
     review = data.get("review") or ""
+    filename = (data.get("filename") or "").strip()
 
     if not body.strip():
         return jsonify({"error": "원고 본문이 비어 있습니다."}), 400
@@ -214,15 +572,10 @@ def write_sheet_route():
     # 편집본 기준으로 글자수 재계산
     char_count = len(body)
 
-    # Drive 업로드 (편집본으로 docx 생성)
-    drive_link = None
-    try:
-        docx_bytes = build_docx_bytes(title, body)
-        fname_base = f"{keyword}_{product}".strip("_") or "원고"
-        fname_base = re.sub(r'[\\/:*?"<>|]', "_", fname_base)[:80]
-        _fid, drive_link = upload_docx_bytes(docx_bytes, f"{fname_base}.docx")
-    except Exception as e:
-        print(f"[write_sheet] Drive 업로드 실패: {e}")
+    # 시트 L열 '원고 다운로드' 링크 — 현 요청의 호스트를 기본값으로 사용
+    # (APP_BASE_URL 환경변수가 있으면 그게 우선)
+    base_url = (os.environ.get("APP_BASE_URL", "").strip()
+                or request.host_url.rstrip("/"))
 
     try:
         sheet_row = write_row(
@@ -230,16 +583,38 @@ def write_sheet_route():
             writer, link,
             title, body, char_count,
             review, model_key,
-            drive_url=drive_link,
+            download_base_url=base_url,
+            filename=filename,
         )
     except Exception as e:
         return jsonify({"error": f"시트 기입 실패: {e}"}), 500
 
     return jsonify({
         "sheet_row": sheet_row,
-        "drive_link": drive_link,
         "char_count": char_count,
     })
+
+
+@app.route("/undo_row", methods=["POST"])
+def undo_row_route():
+    """방금 기입한 행을 빈 값으로 덮어쓰기 — 잘못 기입 되돌리기용."""
+    if not _auth_check(request):
+        return jsonify({"error": "인증 실패"}), 403
+
+    data = request.get_json(force=True) or {}
+    try:
+        row = int(data.get("row"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "row(행 번호)는 정수여야 합니다."}), 400
+
+    try:
+        clear_row(row)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"되돌리기 실패: {e}"}), 500
+
+    return jsonify({"ok": True, "row": row})
 
 
 def _docx_response(docx_bytes, filename):
@@ -254,6 +629,40 @@ def _docx_response(docx_bytes, filename):
             "Content-Length": str(len(docx_bytes)),
         },
     )
+
+
+@app.route("/migrate_l_column", methods=["POST"])
+def migrate_l_column():
+    """기존 행들의 L열 HYPERLINK를 일괄로 /download_row/N 링크로 갱신."""
+    if not _auth_check(request):
+        return jsonify({"error": "인증 실패"}), 403
+    data = request.get_json(silent=True) or {}
+    dry = bool(data.get("dry_run", False))
+    base_url = (os.environ.get("APP_BASE_URL", "").strip()
+                or request.host_url.rstrip("/"))
+    try:
+        result = update_l_column_bulk(base_url, dry_run=dry)
+        result["base_url"] = base_url
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": f"L열 일괄 갱신 실패: {e}"}), 500
+
+
+@app.route("/preview_html", methods=["POST"])
+def preview_html():
+    """편집본(제목/본문)을 받아 서식 적용된 HTML 미리보기 반환."""
+    if not _auth_check(request):
+        return jsonify({"error": "인증 실패"}), 403
+    data = request.get_json(force=True) or {}
+    title = data.get("title", "") or ""
+    body = data.get("body", "") or ""
+    if not body.strip():
+        return jsonify({"error": "body가 비어 있습니다."}), 400
+    try:
+        html = build_html_preview(title, body)
+        return jsonify({"html": html})
+    except Exception as e:
+        return jsonify({"error": f"미리보기 생성 실패: {e}"}), 500
 
 
 @app.route("/download_docx", methods=["POST"])
