@@ -47,18 +47,28 @@ EXCLUDE = [
 ]
 
 def _is_excluded(header):
+    # 외부 사이트 출처 카드는 헤더에 '›'(도메인 경로 구분자)가 박힘 → 스블 오분류 차단
+    if '›' in header:
+        return True
     return any(x in header for x in EXCLUDE)
 
-def classify(unit, n_posts):
+def _live_posts(unit):
+    """광고 배지 붙은 글을 뺀 실제 글 목록."""
+    return [p for p in unit.get("posts", []) if not p.get("ad")]
+
+def classify(unit):
     """유닛 → (종류, 헤더) 또는 None.
-    n_posts = 유닛 안 날짜 토큰 수 ≈ 묶인 글 수. 2개 이상이면 묶음 블록.
+    unit["posts"] = 글 단위 리스트 [{kind:'blog'/'cafe', url, date, ad}]. 광고 글 제외 후 판정.
     """
     h = unit["header"]
-    if unit["blog"] == 0 and unit["cafe"] == 0:
+    live = _live_posts(unit)
+    n_blog = sum(1 for p in live if p["kind"] == "blog")
+    n_cafe = sum(1 for p in live if p["kind"] == "cafe")
+    if n_blog == 0 and n_cafe == 0:
         return None
     if _is_excluded(h):
         return None
-    grouped = n_posts >= 2
+    grouped = (n_blog + n_cafe) >= 2
     # 인기글: _fe_view_root + "인기글"로 끝남 + 묶음
     if unit["fe_view"] and h.endswith("인기글") and grouped:
         return ("인기글", h)
@@ -66,7 +76,7 @@ def classify(unit, n_posts):
     if grouped:
         return ("스블", h)
     # 낱개 글: 블로그면 통검블로그 (카페 낱개는 블로그계열 아님 → 제외)
-    if unit["blog"] > 0:
+    if n_blog > 0:
         return ("통검블로그", h)
     return None
 
@@ -119,8 +129,29 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 
-# main_pack 전체에서 섹션박스 넓게 수집 + 조상 중복 제거(낱개 글은 각자 유닛 유지)
+# main_pack에서 섹션박스 수집 + 조상 중복 제거. 각 유닛을 '글 단위(posts)'로 분해:
+#   - 글 = 고유 URL(글ID 포함, blog.naver.com/{id}/{logno} 또는 cafe.naver.com/{cafe}/{no})
+#   - 글마다 작성일(카드 조상에서 첫 날짜 토큰)과 광고 배지 여부를 함께 추출
 UNITS_JS = r"""
+var DATE=/(\d+초 전|\d+분 전|\d+시간 전|\d+일 전|\d+주 전|\d+개월 전|어제|그제|\d{4}\.\d{2}\.\d{2}\.?)/;
+var BLOG=/blog\.naver\.com\/[^\/?#]+\/\d+/, CAFE=/cafe\.naver\.com\/[^\/?#]+\/\d+/;
+function cardDate(a){ // 앵커에서 위로 올라가며 날짜 토큰 가진 가장 가까운 카드의 날짜
+  var p=a;
+  for(var d=0; d<8 && p; d++){ var m=(p.innerText||'').match(DATE); if(m) return m[1]; p=p.parentElement; }
+  return '';
+}
+function isAd(a){ // 글카드 안에 광고 배지(ad_mark / 숨김텍스트 '광고' / img alt 광고)가 있나
+  var p=a;
+  for(var d=0; d<8 && p; d++){
+    if(p.querySelector){
+      if(p.querySelector('.ad_mark, [class*="ad_"], img[alt="광고"]')) return true;
+      var bl=p.querySelectorAll('.blind');
+      for(var i=0;i<bl.length;i++){ if((bl[i].textContent||'').trim()==='광고') return true; }
+    }
+    p=p.parentElement;
+  }
+  return false;
+}
 var pack=document.getElementById('main_pack')||document.body;
 var nodes=pack.querySelectorAll('section, div.api_subject_bx, div[class*="sc_"], div[class*="fds-"]');
 var out=[], seen=new Set();
@@ -130,13 +161,21 @@ for(var i=0;i<nodes.length;i++){var el=nodes[i];
   var skip=false,p=el.parentElement;
   while(p){if(seen.has(p)){skip=true;break;}p=p.parentElement;}
   if(skip)continue;
-  var blog=el.querySelectorAll('a[href*="blog.naver.com"]').length;
-  var cafe=el.querySelectorAll('a[href*="cafe.naver.com"]').length;
+  var hasBlog=el.querySelector('a[href*="blog.naver.com"]');
+  var hasCafe=el.querySelector('a[href*="cafe.naver.com"]');
   var h=header(el);
-  if(!h && blog===0 && cafe===0)continue;
+  if(!h && !hasBlog && !hasCafe)continue;
   seen.add(el);
-  out.push({header:h, fe_view:((el.className||'').indexOf('_fe_view_root')>=0),
-            blog:blog, cafe:cafe, text:(el.innerText||'').slice(0,5000)});
+  // 글 단위 추출: 고유 URL별 1건 (글ID 포함 URL만 = 실제 글)
+  var as=el.querySelectorAll('a[href*="naver.com"]'), posts=[], pseen={};
+  for(var j=0;j<as.length;j++){var u=as[j].href.split('?')[0], kind='', key='';
+    if(BLOG.test(u)){kind='blog'; key=u.match(BLOG)[0];}
+    else if(CAFE.test(u)){kind='cafe'; key=u.match(CAFE)[0];}
+    if(!key || pseen[key]) continue;
+    pseen[key]=1;
+    posts.push({kind:kind, url:key, date:cardDate(as[j]), ad:isAd(as[j])});
+  }
+  out.push({header:h, fe_view:((el.className||'').indexOf('_fe_view_root')>=0), posts:posts});
 }
 return out;
 """
@@ -177,15 +216,20 @@ def capture_units(driver, keyword):
 
 def parse_keyword(driver, keyword, today):
     """키워드 1개 → {'인기글':[{header,dates}], '스블':[...], '통검블로그':[...]}.
-    dates는 정규화된 date 객체 리스트."""
+    dates는 정규화된 date 객체 리스트. 광고 글 제외, 고유 글ID URL 단위."""
     units = capture_units(driver, keyword)
     result = {"인기글": [], "스블": [], "통검블로그": []}
     for u in units:
-        raw = extract_dates(u["text"])
-        c = classify(u, len(raw))
+        c = classify(u)
         if not c:
             continue
         kind, header = c
-        dates = [normalize_date(t, today) for t in raw]
+        live = _live_posts(u)
+        # 인기글·통검블로그는 블로그 글만(요구사항 b), 스블은 블록 전체 글
+        if kind == "스블":
+            picked = live
+        else:
+            picked = [p for p in live if p["kind"] == "blog"]
+        dates = [normalize_date(p["date"], today) for p in picked if p["date"]]
         result[kind].append({"header": header, "dates": dates})
     return result
