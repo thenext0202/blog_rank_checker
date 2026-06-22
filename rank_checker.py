@@ -4,20 +4,20 @@
 rank_checker.py - 순위 체커 통합 (공통 시트 연동)
 
 공통 시트의 '순위 체커' 탭에서 체크박스 트리거 →
-네이버 메인(통합검색) 순위 우선 확인 → 없으면 블로그탭 →
-결과를 원본 탭 J열에 기록, 블로그탭이면 블탭 표시열에 "블탭"
-  - 자사 발행리스트: 블탭 표시 = T열
-  - 내부 발행리스트: 블탭 표시 = Q열
+네이버 메인(통합검색) 순위만 확인 → 결과를 원본 탭 J열에 기록.
+  (블로그탭 검색은 제거됨 — 메인 순위만 추적)
+
+체크 일정: 발행일 기준 1·4·7·10·13·16·19·21일차(달력, 3일 간격) = 8회.
 
 순위 체커 탭 구조 (자사+내부 섞여서 관리):
   A: 파라미터값 | B: 키워드 | C: 링크 | D: 실행(체크박스)
-  E: 메인1 | F: 블탭1 | G: 메인2 | H: 블탭2 | I: 메인3 | J: 블탭3
-  K: 최초체크일 | L: 상태 | M: 발행일
+  E~L: 메인1 ~ 메인8 (8회차 메인 순위)
+  M: 최초체크일 | N: 상태 | O: 발행일
 
 실행 모드:
   python rank_checker.py          # 1회 실행 (체크된 행만)
   python rank_checker.py watch    # 60초 감시 모드 (로컬용)
-  python rank_checker.py cron     # 3영업일 이내 행 자동 (Railway 크론용)
+  python rank_checker.py cron     # 일정 도래 행 자동 (Railway 크론용)
 """
 
 import time
@@ -43,7 +43,11 @@ TAB_INTERNAL   = "내부 발행리스트"
 TAB_CHECKER    = "순위 체커"
 CRED_FILE      = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "..", "manuscript_generator", "credentials.json")
-BLOG_TAB_LIMIT = 10  # 블로그탭 순위 체크 상한
+
+# 체크 일정: 발행일로부터 경과 달력일. 슬롯 1~8에 1:1 대응.
+#   발행일 다음날=1일차, 3일 간격, 마지막(21일차)만 2일 간격 → 최대 21일
+SCHEDULE_DAYS = [1, 4, 7, 10, 13, 16, 19, 21]
+NUM_SLOTS = len(SCHEDULE_DAYS)  # 8
 
 # 자사 발행리스트 열 인덱스 (0-based)
 SRC_COL_A = 0   # 발행일 (월/일)
@@ -51,7 +55,7 @@ SRC_COL_E = 4   # 키워드
 SRC_COL_H = 7   # 파라미터값 (조인키)
 SRC_COL_J = 9   # 순위 결과
 SRC_COL_M = 12  # 링크 (타겟 URL)
-SRC_COL_T = 19  # 블탭 표시
+SRC_COL_T = 19  # 구 블탭 표시 (이제 기록 안 함 — 남은 값 클리어용)
 
 # 내부 발행리스트 열 인덱스 (0-based)
 INT_COL_A = 0   # 발행일
@@ -59,22 +63,27 @@ INT_COL_E = 4   # 키워드
 INT_COL_H = 7   # 파라미터값 (조인키)
 INT_COL_J = 9   # 순위 결과
 INT_COL_M = 12  # 링크 (타겟 URL)
-INT_COL_Q = 16  # 블탭 표시
+INT_COL_Q = 16  # 구 블탭 표시 (이제 기록 안 함 — 남은 값 클리어용)
 
-# 순위 체커 탭 열 인덱스 (0-based)
-CHK_COL_A = 0   # 파라미터값
-CHK_COL_B = 1   # 키워드
-CHK_COL_C = 2   # 링크
-CHK_COL_D = 3   # 실행 (체크박스)
-CHK_COL_E = 4   # 메인1
-CHK_COL_F = 5   # 블탭1
-CHK_COL_G = 6   # 메인2
-CHK_COL_H = 7   # 블탭2
-CHK_COL_I = 8   # 메인3
-CHK_COL_J = 9   # 블탭3
-CHK_COL_K = 10  # 최초체크일
-CHK_COL_L = 11  # 상태
-CHK_COL_M = 12  # 발행일 (자사 발행리스트 A열)
+# 순위 체커 탭 열 인덱스 (0-based) — 메인 8슬롯
+CHK_COL_A = 0    # 파라미터값
+CHK_COL_B = 1    # 키워드
+CHK_COL_C = 2    # 링크
+CHK_COL_D = 3    # 실행 (체크박스)
+# E~L = 메인1~메인8 (슬롯). 슬롯 컬럼 문자는 SLOT_COLS 참조.
+CHK_SLOT_START = 4   # 메인1 = E열 (0-based 4)
+CHK_COL_K = 12   # 최초체크일 (M열)  ※ 변수명은 호환 위해 유지
+CHK_COL_L = 13   # 상태 (N열)
+CHK_COL_M = 14   # 발행일 (O열, 자사 발행리스트 A열)
+
+# 컬럼 문자 상수 (시트 범위 지정용)
+SLOT_COLS = {f"slot{i}": chr(ord("A") + CHK_SLOT_START + i - 1)
+             for i in range(1, NUM_SLOTS + 1)}   # slot1=E ... slot8=L
+COL_FIRST  = "M"   # 최초체크일
+COL_STATUS = "N"   # 상태
+COL_PUB    = "O"   # 발행일
+COL_LAST   = "O"   # 마지막 열 (범위 끝)
+NUM_COLS   = ord(COL_LAST) - ord("A") + 1   # 15
 
 # 노란색 배경 (순위 변동 표시)
 LIGHT_YELLOW = {"backgroundColor": {"red": 1, "green": 1, "blue": 0.8}}
@@ -110,23 +119,41 @@ def connect_sheets():
     return spreadsheet, ws_source, ws_internal, ws_checker
 
 
-def ensure_checker_tab(spreadsheet):
-    """순위 체커 탭이 없으면 생성, 있으면 반환"""
-    existing = [ws.title for ws in spreadsheet.worksheets()]
-    if TAB_CHECKER in existing:
-        return spreadsheet.worksheet(TAB_CHECKER)
+# 순위 체커 탭 헤더 (15열, 메인 8슬롯)
+CHECKER_HEADER = ["파라미터값", "키워드", "링크", "실행",
+                  "메인1", "메인2", "메인3", "메인4",
+                  "메인5", "메인6", "메인7", "메인8",
+                  "최초체크일", "상태", "발행일"]
 
-    ws = spreadsheet.add_worksheet(title=TAB_CHECKER, rows=1000, cols=13)
-    ws.update(
-        values=[["파라미터값", "키워드", "링크", "실행",
-                 "메인1", "블탭1", "메인2", "블탭2", "메인3", "블탭3",
-                 "최초체크일", "상태", "발행일"]],
-        range_name="A1:M1",
-    )
-    # D열 체크박스
+
+def _create_checker_ws(spreadsheet):
+    """새 레이아웃(15열)으로 순위 체커 탭 생성 + 헤더 + 체크박스."""
+    ws = spreadsheet.add_worksheet(title=TAB_CHECKER, rows=1000, cols=NUM_COLS)
+    ws.update(values=[CHECKER_HEADER], range_name=f"A1:{COL_LAST}1")
     set_checkbox(spreadsheet, ws, "D2:D1000")
-    print(f"    '{TAB_CHECKER}' 탭 생성 완료")
+    print(f"    '{TAB_CHECKER}' 탭 생성 완료 (메인 8슬롯)")
     return ws
+
+
+def ensure_checker_tab(spreadsheet):
+    """순위 체커 탭 반환. 없으면 생성.
+    기존 탭이 구 레이아웃(블탭 포함)이면 백업으로 rename 후 새 탭 재생성(데이터 보존)."""
+    existing = [ws.title for ws in spreadsheet.worksheets()]
+    if TAB_CHECKER not in existing:
+        return _create_checker_ws(spreadsheet)
+
+    ws = spreadsheet.worksheet(TAB_CHECKER)
+    header = ws.row_values(1)
+    if header[:len(CHECKER_HEADER)] == CHECKER_HEADER:
+        return ws  # 이미 새 레이아웃
+
+    # 구 레이아웃 감지 → 백업 후 재생성 (삭제 아님, 되돌리기 가능)
+    backup = f"{TAB_CHECKER}_백업_{datetime.now().strftime('%Y%m%d')}"
+    if backup in existing:
+        backup += datetime.now().strftime("_%H%M%S")  # 같은 날 두 번이면 시각 추가
+    ws.update_title(backup)
+    print(f"    [백업] 구 '{TAB_CHECKER}' 탭 → '{backup}'로 보존")
+    return _create_checker_ws(spreadsheet)
 
 
 def set_checkbox(spreadsheet, ws, range_str):
@@ -206,13 +233,13 @@ def sync_tab(ws_source, ws_internal, ws_checker):
         if p:
             chk_params.add(p)
 
-    # 신규 행 추가 (13열: A~M)
+    # 신규 행 추가 (15열: A~O) — 메인 8슬롯(E~L)은 빈칸
     new_rows = []
     for param, (kw, link, pub_date) in merged_data.items():
         if param not in chk_params:
-            new_rows.append([param, kw, link, False,
-                             "", "", "", "", "", "", "", "", pub_date])
-
+            slots_blank = [""] * NUM_SLOTS          # 메인1~8
+            new_rows.append([param, kw, link, False] + slots_blank
+                            + ["", "", pub_date])   # 최초체크일, 상태, 발행일
     if new_rows:
         start_row = len(chk_rows) + 1
         end_row = start_row + len(new_rows) - 1
@@ -221,7 +248,7 @@ def sync_tab(ws_source, ws_internal, ws_checker):
             ws_checker.add_rows(end_row - ws_checker.row_count + 100)
         ws_checker.update(
             values=new_rows,
-            range_name=f"A{start_row}:M{end_row}",
+            range_name=f"A{start_row}:{COL_LAST}{end_row}",
         )
         print(f"    동기화: {len(new_rows)}개 신규 행 추가")
 
@@ -239,10 +266,10 @@ def sync_tab(ws_source, ws_internal, ws_checker):
                     "range": f"B{idx}:C{idx}",
                     "values": [[src_kw, src_link]],
                 })
-            # 날짜 형식이 다르면 (4/10 → 2026-04-10) 업데이트
+            # 날짜 형식이 다르면 (4/10 → 2026-04-10) 업데이트 — 발행일은 O열
             if cur_pub != src_pub:
                 updates.append({
-                    "range": f"M{idx}",
+                    "range": f"{COL_PUB}{idx}",
                     "values": [[src_pub]],
                 })
 
@@ -256,16 +283,16 @@ def sync_tab(ws_source, ws_internal, ws_checker):
     # 고아 행 감지/표시 (발행리스트에서 사라진 파라미터 → L열 마킹 + 빨간 배경)
     mark_orphan_rows(ws_checker, chk_rows, merged_data)
 
-    # 발행일(M열) 기준 내림차순 정렬 (최신이 위로)
+    # 발행일(O열) 기준 내림차순 정렬 (최신이 위로)
     sort_by_pub_date(ws_checker)
 
     return src_rows, int_rows
 
 
 def mark_orphan_rows(ws_checker, chk_rows, merged_data):
-    """순위체커 A열 파라미터가 발행리스트에 없으면 L열에 고아 표시 + 빨간 배경.
-    반대로, 고아였다가 발행리스트에 다시 나타나면 L열 표시/배경 복구."""
-    cell_updates = []   # L열 텍스트 변경 (batch_update용)
+    """순위체커 A열 파라미터가 발행리스트에 없으면 상태열(N)에 고아 표시 + 빨간 배경.
+    반대로, 고아였다가 발행리스트에 다시 나타나면 표시/배경 복구."""
+    cell_updates = []   # 상태열 텍스트 변경 (batch_update용)
     orphan_rows = []    # 빨간 배경 적용할 행
     recovered_rows = [] # 흰 배경 복구할 행
 
@@ -280,11 +307,11 @@ def mark_orphan_rows(ws_checker, chk_rows, merged_data):
         was_marked = cur_status.startswith("고아") or cur_status == "오류: 매핑 실패"
 
         if is_orphan and not was_marked:
-            # 새로 고아가 된 행: L열 비어있거나 다른 정상 상태였더라도 마킹
+            # 새로 고아가 된 행: 상태열 비어있거나 다른 정상 상태였더라도 마킹
             # (단 정상 상태는 덮어쓰지 않음 — 발행 결과 보존)
             if not cur_status:
                 cell_updates.append({
-                    "range": f"L{idx}",
+                    "range": f"{COL_STATUS}{idx}",
                     "values": [[ORPHAN_LABEL]],
                 })
             orphan_rows.append(idx)
@@ -292,14 +319,14 @@ def mark_orphan_rows(ws_checker, chk_rows, merged_data):
             # 이미 마킹된 고아 — 라벨만 통일
             if cur_status != ORPHAN_LABEL:
                 cell_updates.append({
-                    "range": f"L{idx}",
+                    "range": f"{COL_STATUS}{idx}",
                     "values": [[ORPHAN_LABEL]],
                 })
             orphan_rows.append(idx)
         elif not is_orphan and was_marked:
             # 발행리스트에 다시 나타남 — 복구
             cell_updates.append({
-                "range": f"L{idx}",
+                "range": f"{COL_STATUS}{idx}",
                 "values": [[""]],
             })
             recovered_rows.append(idx)
@@ -309,12 +336,12 @@ def mark_orphan_rows(ws_checker, chk_rows, merged_data):
 
     # 배경색은 format이라 batch가 따로. 행 수 적을 때만 적용 (과도한 API 호출 방지)
     for idx in orphan_rows:
-        ws_checker.format(f"A{idx}:M{idx}", LIGHT_RED)
+        ws_checker.format(f"A{idx}:{COL_LAST}{idx}", LIGHT_RED)
     for idx in recovered_rows:
-        ws_checker.format(f"A{idx}:M{idx}", WHITE)
+        ws_checker.format(f"A{idx}:{COL_LAST}{idx}", WHITE)
 
     if orphan_rows:
-        print(f"    고아 행 감지: {len(orphan_rows)}건 (L열 빨간색 표시)")
+        print(f"    고아 행 감지: {len(orphan_rows)}건 (상태열 빨간색 표시)")
         for idx in orphan_rows[:10]:
             print(f"      행{idx}")
         if len(orphan_rows) > 10:
@@ -324,7 +351,7 @@ def mark_orphan_rows(ws_checker, chk_rows, merged_data):
 
 
 def sort_by_pub_date(ws_checker):
-    """순위 체커 탭을 발행일(M열) 기준 내림차순 정렬 (서식 유지)"""
+    """순위 체커 탭을 발행일(O열) 기준 내림차순 정렬 (서식 유지)"""
     chk_rows = ws_checker.get_all_values()
     if len(chk_rows) <= 2:
         return
@@ -337,10 +364,10 @@ def sort_by_pub_date(ws_checker):
                     "sheetId": sheet_id,
                     "startRowIndex": 1,  # 헤더 제외
                     "startColumnIndex": 0,
-                    "endColumnIndex": 13,
+                    "endColumnIndex": NUM_COLS,
                 },
                 "sortSpecs": [{
-                    "dimensionIndex": CHK_COL_M,  # M열(발행일)
+                    "dimensionIndex": CHK_COL_M,  # O열(발행일)
                     "sortOrder": "DESCENDING",
                 }],
             }
@@ -438,19 +465,6 @@ def parse_rank(val: str):
     return int(m.group(1)) if m else None
 
 
-def get_business_days_ago(n, today=None):
-    """오늘로부터 n영업일 전 날짜 반환 (주말 건너뜀)"""
-    if today is None:
-        today = datetime.now().date()
-    count = 0
-    d = today
-    while count < n:
-        d -= timedelta(days=1)
-        if d.weekday() < 5:  # 월~금
-            count += 1
-    return d
-
-
 def parse_date(date_str):
     """다양한 날짜 형식 파싱 → date 객체. 실패 시 None"""
     if not date_str:
@@ -475,17 +489,40 @@ def parse_date(date_str):
     return None
 
 
-def is_within_check_range(date_str, today=None):
-    """발행일이 체크 대상 범위인지 (어제부터 영업일 3일 거슬러)"""
-    check_date = parse_date(date_str)
-    if check_date is None:
-        return False
+# ── 메인 슬롯(8개) 헬퍼 + 일정 기반 슬롯 결정 ──
+
+def _slot_values(row):
+    """행에서 메인1~8 슬롯 값 8개를 리스트로 반환."""
+    return [_cell(row, CHK_SLOT_START + i) for i in range(NUM_SLOTS)]
+
+
+def _last_filled_before(vals, i):
+    """index i 이전(0..i-1)에서 가장 최근에 채워진 슬롯 값. 없으면 None.
+    (순위 상승 노란색 비교용 직전값)"""
+    for j in range(i - 1, -1, -1):
+        if vals[j]:
+            return vals[j]
+    return None
+
+
+def due_slot(row, today=None):
+    """발행일 기준 일정(SCHEDULE_DAYS)으로 지금 채워야 할 슬롯 결정.
+    반환 (slot_name, prev_main_str) 또는 (None, None).
+    - 경과 달력일 >= 목표일이고 아직 빈 '가장 이른' 슬롯을 고른다(누락분 따라잡기).
+    - 1일차(첫 목표) 전이거나, 도래한 슬롯이 모두 차있으면 None."""
     if today is None:
         today = datetime.now().date()
-    # 어제부터 영업일 3일 전까지
-    end = today - timedelta(days=1)  # 어제
-    start = get_business_days_ago(3, today)
-    return start <= check_date <= end
+    pub = parse_date(_cell(row, CHK_COL_M))  # 발행일(O열)
+    if pub is None:
+        return None, None
+    elapsed = (today - pub).days
+    if elapsed < SCHEDULE_DAYS[0]:
+        return None, None  # 아직 1일차 전
+    vals = _slot_values(row)
+    for i, target in enumerate(SCHEDULE_DAYS):
+        if not vals[i] and elapsed >= target:
+            return f"slot{i+1}", _last_filled_before(vals, i)
+    return None, None
 
 
 # ────────────────────────────────────────────────
@@ -535,77 +572,9 @@ MAIN_EXTRACT_JS = """
     return results;
 """
 
-BLOG_EXTRACT_JS = """
-    var results = [];
-
-    var container = document.querySelector('.fds-ugc-single-intention-item-list-tab');
-    if (container) {
-        var children = container.children;
-        for (var i = 0; i < children.length; i++) {
-            var child = children[i];
-
-            var isAd = false;
-            var el = child;
-            while (el && el !== container) {
-                var cls = (el.className || '').toLowerCase();
-                var daa = el.getAttribute('data-ad-area');
-                if (daa !== null || cls.indexOf('ad_area') !== -1 || cls.indexOf('type_ad') !== -1 ||
-                    cls.indexOf('sponsored') !== -1 || cls.indexOf('powerlink') !== -1 ||
-                    cls.indexOf('brand_ad') !== -1 || cls.indexOf('spw_recom') !== -1) {
-                    isAd = true;
-                    break;
-                }
-                el = el.parentElement;
-            }
-            if (isAd) continue;
-
-            var blogLinks = child.querySelectorAll('a[href*="blog.naver.com"]');
-            for (var j = 0; j < blogLinks.length; j++) {
-                var href = blogLinks[j].href;
-                if (!href || href.indexOf('http') !== 0) continue;
-                var pathParts = new URL(href).pathname.split('/').filter(function(p){return p;});
-                if (pathParts.length < 2) continue;
-                results.push(href);
-                break;
-            }
-        }
-        return results;
-    }
-
-    var allLinks = document.querySelectorAll('a[href*="blog.naver.com"]');
-    var seen = {};
-    for (var i = 0; i < allLinks.length; i++) {
-        var href = allLinks[i].href;
-        if (!href || href.indexOf('http') !== 0) continue;
-        var pathParts = new URL(href).pathname.split('/').filter(function(p){return p;});
-        if (pathParts.length < 2) continue;
-        var norm = href.toLowerCase();
-        if (seen[norm]) continue;
-        seen[norm] = true;
-
-        var el = allLinks[i];
-        var isAd = false;
-        while (el) {
-            var cls = (el.className || '').toLowerCase();
-            var daa = el.getAttribute('data-ad-area');
-            if (daa !== null || cls.indexOf('ad_area') !== -1 || cls.indexOf('type_ad') !== -1 ||
-                cls.indexOf('sponsored') !== -1 || cls.indexOf('powerlink') !== -1 ||
-                cls.indexOf('brand_ad') !== -1 || cls.indexOf('spw_recom') !== -1) {
-                isAd = true;
-                break;
-            }
-            el = el.parentElement;
-        }
-        if (isAd) continue;
-
-        results.push(href);
-    }
-    return results;
-"""
-
 
 # ────────────────────────────────────────────────
-#  순위 체크
+#  순위 체크 (메인 통합검색만)
 # ────────────────────────────────────────────────
 
 def check_main(driver, keyword, target_url):
@@ -632,121 +601,63 @@ def check_main(driver, keyword, target_url):
     return None
 
 
-def check_blog(driver, keyword, target_url):
-    """블로그탭 - BLOG_TAB_LIMIT위까지만 체크"""
-    driver.get(
-        "https://search.naver.com/search.naver?ssc=tab.blog.all&sm=tab_jum&query="
-        + urllib.parse.quote(keyword)
-    )
-    time.sleep(3)
-    scroll_times(driver, n=2, pause=2.0)
-    time.sleep(1)
-
-    results = driver.execute_script(BLOG_EXTRACT_JS) or []
-    print(f"           [디버그] 블로그탭 결과 {len(results)}개:")
-    for i, u in enumerate(results[:BLOG_TAB_LIMIT], 1):
-        print(f"             {i}. {u}")
-
-    for rank, url in enumerate(results, start=1):
-        if rank > BLOG_TAB_LIMIT:
-            break
-        if is_match(url, target_url):
-            return rank
-    return None
-
-
 # ────────────────────────────────────────────────
 #  슬롯 결정 + 결과 기록
 # ────────────────────────────────────────────────
 
 def determine_slot(row):
-    """행 데이터를 보고 기록할 슬롯 결정. 모두 차있으면 None.
-    오늘 이미 체크한 슬롯이 있으면 같은 슬롯 덮어쓰기.
-    반환: (슬롯명, 이전 메인 순위, 이전 블탭 순위) 또는 (None, None, None)
+    """수동/기본: 다음 빈 메인 슬롯 결정. 8슬롯 다 차있으면 None.
+    오늘 이미 체크한 슬롯이 있으면 마지막 슬롯 덮어쓰기.
+    반환: (슬롯명, 직전 메인 순위) 또는 (None, None)
     """
-    e = _cell(row, CHK_COL_E)  # 메인1
-    f = _cell(row, CHK_COL_F)  # 블탭1
-    g = _cell(row, CHK_COL_G)  # 메인2
-    h = _cell(row, CHK_COL_H)  # 블탭2
-    i = _cell(row, CHK_COL_I)  # 메인3
-    j = _cell(row, CHK_COL_J)  # 블탭3
+    vals = _slot_values(row)  # 메인1~8
 
-    # 오늘 이미 체크했으면 같은 슬롯 덮어쓰기
+    # 오늘 이미 체크했으면 마지막 채운 슬롯 덮어쓰기
     status = _cell(row, CHK_COL_L)  # "완료 04/10 11:02" 형식
     today_str = datetime.now().strftime("%m/%d")
     if status.startswith("완료") and today_str in status:
-        # 마지막으로 기록된 슬롯 찾기 (가장 뒤에 값이 있는 슬롯)
-        if i or j:
-            return "slot3", g, h
-        elif g or h:
-            return "slot2", e, f
-        elif e or f:
-            return "slot1", None, None
+        filled = [k for k, v in enumerate(vals) if v]
+        if filled:
+            last = filled[-1]
+            return f"slot{last+1}", _last_filled_before(vals, last)
 
-    if not e and not f:
-        return "slot1", None, None
-    elif not g and not h:
-        return "slot2", e, f
-    elif not i and not j:
-        return "slot3", g, h
-    else:
-        return None, None, None
-
-
-# 슬롯 → (메인 열, 블탭 열) 매핑
-SLOT_COLS = {
-    "slot1": ("E", "F"),
-    "slot2": ("G", "H"),
-    "slot3": ("I", "J"),
-}
+    # 다음 빈 슬롯
+    for k, v in enumerate(vals):
+        if not v:
+            return f"slot{k+1}", _last_filled_before(vals, k)
+    return None, None
 
 
 def write_result(ws_source, ws_internal, ws_checker, spreadsheet,
                  source_type, target_row_num, chk_row_num,
-                 main_rank, blog_rank, slot,
-                 prev_main_str, prev_blog_str):
-    """순위 체커 탭(메인+블탭) + 원본 탭(J열+블탭 표시열) 기록 + 노란색
-    source_type: "source"(자사, 블탭=T) | "internal"(내부, 블탭=Q)
+                 main_rank, slot, prev_main_str):
+    """순위 체커 탭(메인 슬롯) + 원본 탭(J열) 기록 + 노란색(순위 상승).
+    블탭은 더 이상 기록하지 않으며, 원본 탭 블탭 표시열(자사 T/내부 Q)은 비운다.
+    source_type: "source"(자사) | "internal"(내부)
     """
     main_str = f"{main_rank}위" if main_rank is not None else "순위 밖"
-    blog_str = f"{blog_rank}위" if blog_rank is not None else "순위 밖"
+    main_col = SLOT_COLS[slot]   # 단일 열 (예: slot2 → "F")
 
-    main_col, blog_col = SLOT_COLS[slot]
-
-    # ── 순위 체커 탭: 메인 + 블탭 기록 ──
-    ws_checker.update(
-        values=[[main_str, blog_str]],
-        range_name=f"{main_col}{chk_row_num}:{blog_col}{chk_row_num}",
-    )
+    # ── 순위 체커 탭: 메인 슬롯 기록 ──
+    ws_checker.update(values=[[main_str]], range_name=f"{main_col}{chk_row_num}")
 
     # 최초체크일 기록 (slot1일 때만)
     if slot == "slot1":
         today_str = datetime.now().strftime("%Y-%m-%d")
-        ws_checker.update(values=[[today_str]], range_name=f"K{chk_row_num}")
+        ws_checker.update(values=[[today_str]], range_name=f"{COL_FIRST}{chk_row_num}")
 
-    # ── 순위 상승 비교 (slot2, slot3) → 노란색 ──
-    if slot in ("slot2", "slot3") and prev_main_str:
+    # ── 순위 상승 비교 (직전 채워진 슬롯과 비교) → 노란색 ──
+    if prev_main_str:
         prev_main = parse_rank(prev_main_str)
-        prev_blog = parse_rank(prev_blog_str)
-
         # 순위 상승 = 숫자가 줄어들거나, 순위 밖 → 순위 진입
         main_up = (main_rank is not None and
                    (prev_main is None or main_rank < prev_main))
-        blog_up = (blog_rank is not None and
-                   (prev_blog is None or blog_rank < prev_blog))
-
-        # 기존 노란색 초기화
-        ws_checker.format(f"{main_col}{chk_row_num}:{blog_col}{chk_row_num}", WHITE)
-
+        # 기존 노란색 초기화 후 상승 시에만 칠함
+        ws_checker.format(f"{main_col}{chk_row_num}", LIGHT_YELLOW if main_up else WHITE)
         if main_up:
-            ws_checker.format(f"{main_col}{chk_row_num}", LIGHT_YELLOW)
             print(f"           메인 순위 상승! ({prev_main_str} → {main_str}) 노란색")
-        if blog_up:
-            ws_checker.format(f"{blog_col}{chk_row_num}", LIGHT_YELLOW)
-            print(f"           블탭 순위 상승! ({prev_blog_str} → {blog_str}) 노란색")
 
-    # ── 원본 탭: J열(순위) + 블탭 표시열 기록 ──
-    # 자사=T열, 내부=Q열
+    # ── 원본 탭: J열(메인 순위)만 기록 + 블탭 표시열 클리어 ──
     if source_type == "internal":
         target_ws = ws_internal
         blog_flag_col = "Q"
@@ -756,24 +667,19 @@ def write_result(ws_source, ws_internal, ws_checker, spreadsheet,
         blog_flag_col = "T"
         label = "자사"
 
-    # 메인 우선 → 없으면 블로그탭 → 둘 다 없으면 기입 안 함
+    # 메인 순위가 있으면 J열 기록, 옛 블탭 표시는 항상 비움
     if main_rank is not None:
         target_ws.update(values=[[main_str]], range_name=f"J{target_row_num}")
-        target_ws.update(values=[[""]], range_name=f"{blog_flag_col}{target_row_num}")
-    elif blog_rank is not None:
-        target_ws.update(values=[[blog_str]], range_name=f"J{target_row_num}")
-        target_ws.update(values=[["블탭"]], range_name=f"{blog_flag_col}{target_row_num}")
+    target_ws.update(values=[[""]], range_name=f"{blog_flag_col}{target_row_num}")
 
     # 원본 탭 J열 순위 상승 시 노란색
-    if slot in ("slot2", "slot3") and prev_main_str:
-        prev_j = parse_rank(prev_main_str) if parse_rank(prev_main_str) else parse_rank(prev_blog_str)
-        curr_j = main_rank if main_rank is not None else blog_rank
-        # 순위 상승일 때만 노란색
-        j_up = (curr_j is not None and
-                (prev_j is None or curr_j < prev_j))
+    if prev_main_str:
+        prev_j = parse_rank(prev_main_str)
+        j_up = (main_rank is not None and
+                (prev_j is None or main_rank < prev_j))
         target_ws.format(f"J{target_row_num}", LIGHT_YELLOW if j_up else WHITE)
 
-    return main_str, blog_str, label
+    return main_str, label
 
 
 def build_param_row_map(src_rows, int_rows):
@@ -796,55 +702,49 @@ def build_param_row_map(src_rows, int_rows):
 
 def process_rows(ws_source, ws_internal, ws_checker, spreadsheet, driver, targets, param_map):
     """대상 행들의 순위 체크 + 결과 기록"""
-    for i, (chk_row_num, param, kw, link, slot, prev_main, prev_blog, row_data) in enumerate(targets):
+    for i, (chk_row_num, param, kw, link, slot, prev_main, row_data) in enumerate(targets):
         mapping = param_map.get(param)
         if not mapping:
             print(f"\n  [{i+1}/{len(targets)}] {param} — 자사/내부 발행리스트에서 행 못 찾음, 스킵")
-            ws_checker.update(values=[[ORPHAN_LABEL]], range_name=f"L{chk_row_num}")
-            ws_checker.format(f"A{chk_row_num}:M{chk_row_num}", LIGHT_RED)
+            ws_checker.update(values=[[ORPHAN_LABEL]], range_name=f"{COL_STATUS}{chk_row_num}")
+            ws_checker.format(f"A{chk_row_num}:{COL_LAST}{chk_row_num}", LIGHT_RED)
             continue
         source_type, target_row_num = mapping
 
         if not kw or not link:
             print(f"\n  [{i+1}/{len(targets)}] {param} — 키워드 또는 링크 없음, 스킵")
-            ws_checker.update(values=[["스킵(데이터 없음)"]], range_name=f"L{chk_row_num}")
+            ws_checker.update(values=[["스킵(데이터 없음)"]], range_name=f"{COL_STATUS}{chk_row_num}")
             continue
 
         slot_label = slot.replace("slot", "")
         origin_label = "내부" if source_type == "internal" else "자사"
         print(f"\n  [{i+1}/{len(targets)}] [{origin_label}] 키워드: {kw}")
         print(f"           타겟: {link}")
-        print(f"           기록 위치: {slot_label}차")
+        print(f"           기록 위치: 메인{slot_label}")
 
         try:
             # 괄호 제거된 키워드로 검색
             search_kw = clean_keyword(kw)
 
-            # 메인(통합검색) 체크
+            # 메인(통합검색) 체크 — 메인만 본다
             print("           메인 검색 중...", end=" ", flush=True)
             main_rank = check_main(driver, search_kw, link)
             main_str = f"{main_rank}위" if main_rank else "순위 밖"
             print(main_str)
 
-            # 블로그탭도 항상 체크
-            print("           블로그탭 검색 중...", end=" ", flush=True)
-            blog_rank = check_blog(driver, search_kw, link)
-            blog_str = f"{blog_rank}위" if blog_rank else "순위 밖"
-            print(blog_str)
-
             write_result(
                 ws_source, ws_internal, ws_checker, spreadsheet,
                 source_type, target_row_num, chk_row_num,
-                main_rank, blog_rank, slot, prev_main, prev_blog,
+                main_rank, slot, prev_main,
             )
 
             # 상태 업데이트
             now = datetime.now().strftime("%m/%d %H:%M")
-            ws_checker.update(values=[[f"완료 {now}"]], range_name=f"L{chk_row_num}")
+            ws_checker.update(values=[[f"완료 {now}"]], range_name=f"{COL_STATUS}{chk_row_num}")
 
         except Exception as e:
             print(f"\n           [!] 오류: {e}")
-            ws_checker.update(values=[[f"오류: {e}"]], range_name=f"L{chk_row_num}")
+            ws_checker.update(values=[[f"오류: {e}"]], range_name=f"{COL_STATUS}{chk_row_num}")
             try:
                 driver.quit()
             except Exception:
@@ -871,7 +771,7 @@ def has_any_checked(chk_rows):
 
 
 def get_checked_targets(chk_rows, clear_rows):
-    """수동 체크된 행 중 빈 슬롯 있는 행만 (3영업일 필터 없음)"""
+    """수동 체크된 행 중 빈 슬롯 있는 행만 (일정 필터 없음 — 다음 빈 슬롯에 기록)"""
     checked_set = set(clear_rows)
     targets = []
     for idx, row in enumerate(chk_rows[1:], start=2):
@@ -882,15 +782,15 @@ def get_checked_targets(chk_rows, clear_rows):
         link = _cell(row, CHK_COL_C)
         if not param or not kw or not link:
             continue
-        slot, prev_main, prev_blog = determine_slot(row)
+        slot, prev_main = determine_slot(row)
         if slot is None:
             continue
-        targets.append((idx, param, kw, link, slot, prev_main, prev_blog, row))
+        targets.append((idx, param, kw, link, slot, prev_main, row))
     return targets
 
 
 def get_cron_targets(chk_rows):
-    """3영업일 이내(발행일 기준) + 빈 슬롯 있는 행만"""
+    """일정 도래(발행일 기준 1·4·7…21일차) + 빈 슬롯 있는 행만"""
     targets = []
     today = datetime.now().date()
 
@@ -898,25 +798,15 @@ def get_cron_targets(chk_rows):
         param = _cell(row, CHK_COL_A)
         kw = _cell(row, CHK_COL_B)
         link = _cell(row, CHK_COL_C)
-        pub_date = _cell(row, CHK_COL_M)  # 발행일 (자사 발행리스트 A열)
         if not param or not kw or not link:
             continue
 
-        slot, prev_main, prev_blog = determine_slot(row)
+        # 발행일 경과일이 일정에 도달한 가장 이른 빈 슬롯
+        slot, prev_main = due_slot(row, today=today)
         if slot is None:
-            continue  # 3슬롯 다 참
+            continue  # 아직 도래 안 함 / 8슬롯 다 참 / 발행일 없음
 
-        # 발행일이 3영업일 이내가 아니면 스킵
-        if not is_within_check_range(pub_date, today=today):
-            continue
-
-        # slot2, slot3은 추가로 최초체크일도 확인
-        if slot in ("slot2", "slot3"):
-            first_date = _cell(row, CHK_COL_K)
-            if not is_within_check_range(first_date, today=today):
-                continue
-
-        targets.append((idx, param, kw, link, slot, prev_main, prev_blog, row))
+        targets.append((idx, param, kw, link, slot, prev_main, row))
 
     return targets
 
@@ -943,9 +833,9 @@ def run_once(mode="manual"):
 
     if mode == "cron":
         targets = get_cron_targets(chk_rows)
-        print(f"    크론 모드: 3영업일 이내 대상 {len(targets)}개")
+        print(f"    크론 모드: 일정 도래(1·4·7…21일차) 대상 {len(targets)}개")
     else:
-        # 체크 1개라도 있으면 → 3영업일 룰로 전체 대상 수집
+        # 체크된 행만 대상 (일정 필터 없이 다음 빈 슬롯에 기록)
         triggered, clear_rows = has_any_checked(chk_rows)
         if not triggered:
             print("    처리 대상이 없습니다. D열에 체크해주세요.")
@@ -953,7 +843,7 @@ def run_once(mode="manual"):
         # 체크 해제
         updates = [{"range": f"D{r}", "values": [[False]]} for r in clear_rows]
         ws_checker.batch_update(updates)
-        # 체크된 행만 대상 (3영업일 필터 없음)
+        # 체크된 행만 대상 (일정 필터 없이 다음 빈 슬롯에 기록)
         targets = get_checked_targets(chk_rows, clear_rows)
 
     if not targets:
@@ -1028,14 +918,14 @@ def watch(interval=60):
             updates = [{"range": f"D{r}", "values": [[False]]} for r in clear_rows]
             ws_checker.batch_update(updates)
 
-            # 체크 = 트리거, 실제 대상은 3영업일 이내 전체
+            # 체크 = 트리거, 실제 대상은 일정 도래(1·4·7…21일차) 전체
             targets = get_cron_targets(chk_rows)
             if not targets:
-                print(f"\n\n  >> 체크 감지했으나 처리할 대상 없음 (모두 3슬롯 완료)")
+                print(f"\n\n  >> 체크 감지했으나 처리할 대상 없음 (모두 8슬롯 완료/일정 전)")
                 time.sleep(interval)
                 continue
 
-            print(f"\n\n  >> 체크 감지! 3영업일 이내 {len(targets)}개 처리 시작")
+            print(f"\n\n  >> 체크 감지! 일정 도래 {len(targets)}개 처리 시작")
 
             param_map = build_param_row_map(src_rows, int_rows)
 
