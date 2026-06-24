@@ -5,7 +5,7 @@ GOOGLE_CREDENTIALS_BASE64 → credentials.json 파일로 변환 후 rank_checker
 """
 import os, base64, json, sys
 from datetime import datetime
-print("=== STARTUP v8 (rank_checker.py watch) ===", flush=True)
+print("=== STARTUP v9 (rank_checker.py cron) ===", flush=True)
 print(f"[startup] 시작 시각: {datetime.now()}", flush=True)
 print(f"[startup] TZ: {os.environ.get('TZ', 'not set')}", flush=True)
 
@@ -34,5 +34,5 @@ if creds_b64:
 else:
     print("[startup] GOOGLE_CREDENTIALS_BASE64 없음 → credentials.json 직접 사용")
 
-# rank_checker.py watch 실행
-os.execv(sys.executable, [sys.executable, '/app/rank_checker.py', 'watch'])
+# rank_checker.py cron 실행 (sync 먼저 → 상한만큼 순위체크 → 종료)
+os.execv(sys.executable, [sys.executable, '/app/rank_checker.py', 'cron'])

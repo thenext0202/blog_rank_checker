@@ -49,6 +49,10 @@ CRED_FILE      = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 SCHEDULE_DAYS = [1, 4, 7, 10, 13, 16, 19, 21]
 NUM_SLOTS = len(SCHEDULE_DAYS)  # 8
 
+# 크론 1회 실행당 순위체크 최대 건수 (시트가 발행일 최신순이라 새 글부터 처리).
+# 개편 백로그(슬롯 비어 전부 도래로 잡힌 옛 글)는 매일 이만큼씩 소진된다.
+MAX_CRON_PER_RUN = 300
+
 # 자사 발행리스트 열 인덱스 (0-based)
 SRC_COL_A = 0   # 발행일 (월/일)
 SRC_COL_E = 4   # 키워드
@@ -833,7 +837,13 @@ def run_once(mode="manual"):
 
     if mode == "cron":
         targets = get_cron_targets(chk_rows)
-        print(f"    크론 모드: 일정 도래(1·4·7…21일차) 대상 {len(targets)}개")
+        total_due = len(targets)
+        if total_due > MAX_CRON_PER_RUN:
+            targets = targets[:MAX_CRON_PER_RUN]   # 최신순 → 새 글부터, 나머지는 다음 실행
+            print(f"    크론 모드: 일정 도래 {total_due}개 중 상한 {MAX_CRON_PER_RUN}개 처리"
+                  f" (나머지 {total_due - MAX_CRON_PER_RUN}개는 다음 실행에서)")
+        else:
+            print(f"    크론 모드: 일정 도래(1·4·7…21일차) 대상 {total_due}개")
     else:
         # 체크된 행만 대상 (일정 필터 없이 다음 빈 슬롯에 기록)
         triggered, clear_rows = has_any_checked(chk_rows)
