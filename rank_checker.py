@@ -444,6 +444,25 @@ def is_match(result_url: str, target_url: str) -> bool:
     return normalize(target_url) in normalize(result_url)
 
 
+def is_post_url(url: str) -> bool:
+    """네이버 블로그/카페 '실제 글' 주소인지 판별 (대문/글ID 없는 링크 걸러냄).
+    blog.naver.com/<블로그ID>/<글ID> 처럼 path가 2개 이상이어야 글로 인정.
+    대문(blog.naver.com/vsbears)은 path 1개 → 제외. MAIN_EXTRACT_JS의 기준과 동일."""
+    u = (url or "").strip()
+    if not u:
+        return False
+    try:
+        path = urllib.parse.urlparse(u if "://" in u else "https://" + u).path
+    except Exception:
+        return False
+    parts = [p for p in path.split("/") if p]
+    if "blog.naver.com" in u or "cafe.naver.com" in u:
+        return len(parts) >= 2          # 대문(/vsbears)=1 → 제외, /vsbears/2243...=2 → 통과
+    if "kin.naver.com" in u:
+        return "docId=" in u
+    return True                          # 그 외 도메인은 그대로 통과
+
+
 def scroll_full(driver, max_iter=10, pause=1.5):
     """더 이상 늘어나지 않을 때까지 스크롤"""
     prev = driver.execute_script("return document.body.scrollHeight")
@@ -720,6 +739,13 @@ def process_rows(ws_source, ws_internal, ws_checker, spreadsheet, driver, target
             ws_checker.update(values=[["스킵(데이터 없음)"]], range_name=f"{COL_STATUS}{chk_row_num}")
             continue
 
+        # 글ID 없는 대문 URL(예: .../vsbears)이면 순위 검색 전에 차단 — 슬롯 비운 채 스킵
+        # (타겟 빌더에서 이미 걸러지므로 사실상 안 타는 안전망)
+        if not is_post_url(link):
+            print(f"\n  [{i+1}/{len(targets)}] {param} — 글 주소 미확정(대문 URL), 스킵")
+            ws_checker.update(values=[["대기(글 주소 미확정)"]], range_name=f"{COL_STATUS}{chk_row_num}")
+            continue
+
         slot_label = slot.replace("slot", "")
         origin_label = "내부" if source_type == "internal" else "자사"
         print(f"\n  [{i+1}/{len(targets)}] [{origin_label}] 키워드: {kw}")
@@ -784,7 +810,8 @@ def get_checked_targets(chk_rows, clear_rows):
         param = _cell(row, CHK_COL_A)
         kw = _cell(row, CHK_COL_B)
         link = _cell(row, CHK_COL_C)
-        if not param or not kw or not link:
+        # 글ID 없는 대문 URL(예: .../vsbears)은 건너뜀 — 오탐 방지 + 슬롯 보존
+        if not param or not kw or not link or not is_post_url(link):
             continue
         slot, prev_main = determine_slot(row)
         if slot is None:
@@ -802,7 +829,9 @@ def get_cron_targets(chk_rows):
         param = _cell(row, CHK_COL_A)
         kw = _cell(row, CHK_COL_B)
         link = _cell(row, CHK_COL_C)
-        if not param or not kw or not link:
+        # 글ID 없는 대문 URL(예: .../vsbears)은 건너뜀 — 오탐 방지 + 슬롯 보존
+        # (발행 자동화가 M열에 실제 글 주소를 채우면 다음 실행 sync가 C열을 갱신 → 그때 정상 체크)
+        if not param or not kw or not link or not is_post_url(link):
             continue
 
         # 발행일 경과일이 일정에 도달한 가장 이른 빈 슬롯
